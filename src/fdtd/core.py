@@ -191,14 +191,56 @@ class FDTD2D:
         self.color_grid[self.x_min_pml:self.x_min_pml + self.config.nx,
                         self.y_min_pml:self.y_min_pml + self.config.ny] = color_grid
 
+        if self.x_min_pml > 0 or self.x_max_pml > 0 or self.y_min_pml > 0 or self.y_max_pml > 0:
+            self._apply_pml_conductivity()
+
+    def _apply_pml_conductivity(self):
+        m = 4
+        sigma_max_e = 1.5 * (m + 1) / (ETA0 * self.dx)
+        sigma_max_m = sigma_max_e * MU0 / EPS0
+
+        x_indices = np.arange(self.nx_total)
+        y_indices = np.arange(self.ny_total)
+        X, Y = np.meshgrid(x_indices, y_indices, indexing='ij')
+
+        dist = np.zeros_like(X, dtype=float)
+
+        if self.x_min_pml > 0:
+            d = (self.x_min_pml - X[:self.x_min_pml, :]) / self.x_min_pml
+            dist[:self.x_min_pml, :] = np.maximum(dist[:self.x_min_pml, :], d)
+        if self.x_max_pml > 0:
+            x_start = self.nx_total - self.x_max_pml
+            d = (X[x_start:, :] - (x_start - 1)) / self.x_max_pml
+            dist[x_start:, :] = np.maximum(dist[x_start:, :], d)
+        if self.y_min_pml > 0:
+            d = (self.y_min_pml - Y[:, :self.y_min_pml]) / self.y_min_pml
+            dist[:, :self.y_min_pml] = np.maximum(dist[:, :self.y_min_pml], d)
+        if self.y_max_pml > 0:
+            y_start = self.ny_total - self.y_max_pml
+            d = (Y[:, y_start:] - (y_start - 1)) / self.y_max_pml
+            dist[:, y_start:] = np.maximum(dist[:, y_start:], d)
+
+        mask = dist > 0
+        sigma_e = sigma_max_e * (dist[mask] ** m)
+        sigma_m = sigma_max_m * (dist[mask] ** m)
+
+        self.sigma[mask] = np.maximum(self.sigma[mask], sigma_e)
+
+        self.sigma_m = np.zeros_like(self.mu_r)
+        self.sigma_m[mask] = sigma_m
+
     def _init_coefficients(self):
         eps = EPS0 * self.epsilon_r
         mu = MU0 * self.mu_r
 
         self.ca = (1 - self.sigma * self.dt / (2 * eps)) / (1 + self.sigma * self.dt / (2 * eps))
         self.cb = (self.dt / eps) / (1 + self.sigma * self.dt / (2 * eps))
-        self.da = np.ones_like(self.mu_r)
-        self.db = self.dt / mu
+
+        if not hasattr(self, 'sigma_m'):
+            self.sigma_m = np.zeros_like(self.mu_r)
+
+        self.da = (1 - self.sigma_m * self.dt / (2 * mu)) / (1 + self.sigma_m * self.dt / (2 * mu))
+        self.db = (self.dt / mu) / (1 + self.sigma_m * self.dt / (2 * mu))
 
     def _update_h(self, t_idx: int):
         ez = self.ez

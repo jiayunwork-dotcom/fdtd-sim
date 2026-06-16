@@ -259,11 +259,11 @@ with st.sidebar:
 
         col1, col2 = st.columns(2)
         with col1:
-            src_freq = st.number_input('频率 (GHz)', value=10.0, min_value=0.1, max_value=1000.0, key='src_freq')
-            src_amp = st.number_input('幅值', value=1.0, min_value=0.01, max_value=100.0, key='src_amp')
+            src_freq = st.number_input('频率 (THz)', value=10.0, min_value=0.1, max_value=1000.0, key='src_freq')
+            src_amp = st.number_input('幅值', value=10.0, min_value=0.01, max_value=1000.0, key='src_amp')
         with col2:
             if waveform_type == 'gaussian':
-                src_bw = st.number_input('带宽 (GHz)', value=5.0, min_value=0.1, max_value=500.0, key='src_bw')
+                src_bw = st.number_input('带宽 (THz)', value=5.0, min_value=0.1, max_value=500.0, key='src_bw')
 
         col1, col2 = st.columns(2)
         with col1:
@@ -278,9 +278,9 @@ with st.sidebar:
         if st.button('➕ 添加源', key='add_src_btn', use_container_width=True):
             wf = Waveform(
                 waveform_type=waveform_type,
-                frequency=src_freq * 1e9,
+                frequency=src_freq * 1e12,
                 amplitude=src_amp,
-                bandwidth=src_bw * 1e9 if waveform_type == 'gaussian' else 0.0
+                bandwidth=src_bw * 1e12 if waveform_type == 'gaussian' else 0.0
             )
             src = Source(
                 source_type=source_type,
@@ -300,15 +300,15 @@ with st.sidebar:
             tfsf_angle = st.selectbox('入射角度', [0, 90, 180, 270],
                                       format_func=lambda x: f'{x}°',
                                       key='tfsf_angle')
-            tfsf_freq = st.number_input('频率 (GHz)', value=10.0, key='tfsf_freq')
-            tfsf_bw = st.number_input('带宽 (GHz)', value=5.0, key='tfsf_bw')
-            tfsf_amp = st.number_input('幅值', value=1.0, key='tfsf_amp')
+            tfsf_freq = st.number_input('频率 (THz)', value=10.0, key='tfsf_freq')
+            tfsf_bw = st.number_input('带宽 (THz)', value=5.0, key='tfsf_bw')
+            tfsf_amp = st.number_input('幅值', value=10.0, key='tfsf_amp')
 
             tfsf_wf = Waveform(
                 waveform_type='gaussian',
-                frequency=tfsf_freq * 1e9,
+                frequency=tfsf_freq * 1e12,
                 amplitude=tfsf_amp,
-                bandwidth=tfsf_bw * 1e9
+                bandwidth=tfsf_bw * 1e12
             )
             tfsf = TFSF(
                 x_min=5, x_max=nx - 6,
@@ -427,6 +427,34 @@ with st.sidebar:
             st.session_state.config.observation_points = tpl.observation_points
             st.session_state.near_field_box = tpl.near_field_box
             st.session_state.config.near_field_box = tpl.near_field_box
+
+            factor = factor_to_unit(tpl.config.unit)
+
+            st.session_state.unit_select = tpl.config.unit
+            st.session_state.domain_width = tpl.config.width * factor
+            st.session_state.domain_height = tpl.config.height * factor
+            st.session_state.dx_input = tpl.config.dx * factor
+            st.session_state.total_steps = tpl.config.total_time_steps
+            st.session_state.sample_interval = tpl.config.sample_interval
+            st.session_state.use_custom_dt = False
+
+            st.session_state.bc_xmin = tpl.boundary.x_min_type
+            st.session_state.bc_xmax = tpl.boundary.x_max_type
+            st.session_state.bc_ymin = tpl.boundary.y_min_type
+            st.session_state.bc_ymax = tpl.boundary.y_max_type
+            st.session_state.pml_layers = tpl.boundary.pml_layers
+
+            st.session_state.use_tfsf = tpl.source_mgr.tfsf is not None
+            if tpl.source_mgr.tfsf is not None:
+                st.session_state.tfsf_angle = tpl.source_mgr.tfsf.incident_angle
+                st.session_state.tfsf_freq = tpl.source_mgr.tfsf.waveform.frequency / 1e12
+                st.session_state.tfsf_bw = tpl.source_mgr.tfsf.waveform.bandwidth / 1e12
+                st.session_state.tfsf_amp = tpl.source_mgr.tfsf.waveform.amplitude
+
+            st.session_state.result = None
+            st.session_state.far_field_result = None
+            st.session_state.current_frame = 0
+
             st.success(f'已应用模板: {selected_template}')
             st.rerun()
 

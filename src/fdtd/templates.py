@@ -38,7 +38,7 @@ def single_slit_diffraction() -> Template:
         height=200e-6,
         dx=1e-6,
         dy=1e-6,
-        total_time_steps=800,
+        total_time_steps=1000,
         unit='um',
         sample_interval=5
     )
@@ -66,9 +66,9 @@ def single_slit_diffraction() -> Template:
     source_mgr = SourceManager()
     waveform = Waveform(
         waveform_type='gaussian',
-        frequency=10e9,
-        amplitude=1.0,
-        bandwidth=5e9
+        frequency=10e12,
+        amplitude=10.0,
+        bandwidth=5e12
     )
     tfsf = TFSF(
         x_min=10, x_max=190,
@@ -104,7 +104,7 @@ def double_slit_interference() -> Template:
         height=200e-6,
         dx=1e-6,
         dy=1e-6,
-        total_time_steps=800,
+        total_time_steps=1000,
         unit='um',
         sample_interval=5
     )
@@ -140,9 +140,9 @@ def double_slit_interference() -> Template:
     source_mgr = SourceManager()
     waveform = Waveform(
         waveform_type='gaussian',
-        frequency=10e9,
-        amplitude=1.0,
-        bandwidth=5e9
+        frequency=10e12,
+        amplitude=10.0,
+        bandwidth=5e12
     )
     tfsf = TFSF(
         x_min=10, x_max=190,
@@ -178,7 +178,7 @@ def waveguide_transmission() -> Template:
         height=200e-6,
         dx=1e-6,
         dy=1e-6,
-        total_time_steps=800,
+        total_time_steps=1000,
         unit='um',
         sample_interval=5
     )
@@ -206,8 +206,8 @@ def waveguide_transmission() -> Template:
     source_mgr = SourceManager()
     waveform = Waveform(
         waveform_type='sine',
-        frequency=15e9,
-        amplitude=1.0
+        frequency=15e12,
+        amplitude=10.0
     )
     source_mgr.add_source(Source(
         source_type='line',
@@ -242,7 +242,7 @@ def dielectric_sphere_scattering() -> Template:
         height=150e-6,
         dx=1e-6,
         dy=1e-6,
-        total_time_steps=600,
+        total_time_steps=1200,
         unit='um',
         sample_interval=5
     )
@@ -263,9 +263,9 @@ def dielectric_sphere_scattering() -> Template:
     source_mgr = SourceManager()
     waveform = Waveform(
         waveform_type='gaussian',
-        frequency=10e9,
-        amplitude=1.0,
-        bandwidth=5e9
+        frequency=10e12,
+        amplitude=10.0,
+        bandwidth=5e12
     )
     tfsf = TFSF(
         x_min=15, x_max=135,
@@ -304,7 +304,7 @@ def microstrip_line() -> Template:
         height=60e-6,
         dx=0.5e-6,
         dy=0.5e-6,
-        total_time_steps=600,
+        total_time_steps=1000,
         unit='um',
         sample_interval=5
     )
@@ -330,7 +330,6 @@ def microstrip_line() -> Template:
         params={'x0': 0, 'y0': 0, 'width': 100e-6, 'height': 2e-6},
         is_pec=True
     ))
-
     struct_mgr.add_structure(Structure(
         shape_type='rectangle',
         material_name='PEC',
@@ -341,9 +340,9 @@ def microstrip_line() -> Template:
     source_mgr = SourceManager()
     waveform = Waveform(
         waveform_type='gaussian',
-        frequency=20e9,
-        amplitude=1.0,
-        bandwidth=10e9
+        frequency=20e12,
+        amplitude=10.0,
+        bandwidth=10e12
     )
     source_mgr.add_source(Source(
         source_type='point',
