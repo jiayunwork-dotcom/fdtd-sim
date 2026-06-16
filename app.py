@@ -984,10 +984,15 @@ st.title('📡 FDTD 电磁场仿真与分析工具')
 st.caption('基于 Yee 网格的二维 TM 模式有限差分时域仿真')
 
 result = st.session_state.result
+sparam_result = st.session_state.sparam_result
 config = st.session_state.config
 factor = factor_to_unit(config.unit)
 
-if result is None:
+has_field_result = result is not None
+has_sparam_result = sparam_result is not None
+has_any_result = has_field_result or has_sparam_result
+
+if not has_any_result:
     col_left, col_right = st.columns([2, 1])
 
     with col_left:
@@ -1044,8 +1049,9 @@ if result is None:
         2. 添加材料结构
         3. 设置激励源
         4. 选择边界条件
-        5. 点击"运行仿真"
-        6. 查看结果和分析
+        5. 点击"运行仿真"查看场分布
+        6. 或在"S参数分析"面板提取S参数
+        7. 查看结果和分析
         """)
 
 else:
@@ -1054,7 +1060,9 @@ else:
     )
 
     with tab1:
-        if compare_mode and st.session_state.compare_result is not None:
+        if not has_field_result:
+            st.info('请先点击侧边栏的"运行仿真"按钮运行普通FDTD仿真，以查看场分布结果。')
+        elif compare_mode and st.session_state.compare_result is not None:
             compare_result = st.session_state.compare_result
             compare_color_grid = getattr(st.session_state, 'compare_color_grid', None)
             total_frames = min(len(result.ez_frames), len(compare_result.ez_frames))
@@ -1347,65 +1355,70 @@ else:
                 st.metric('峰值场强', f'{np.max(np.abs(result.ez_final)):.4f} V/m')
 
     with tab2:
-        obs_points = st.session_state.observation_points
-        if obs_points and result.observation_data:
-            selected_idx = st.selectbox('选择观测点',
-                                        [f'点 {i+1}: ({pt[0]}, {pt[1]})' for i, pt in enumerate(obs_points)],
-                                        key='obs_select')
-            idx = [f'点 {i+1}: ({pt[0]}, {pt[1]})' for i, pt in enumerate(obs_points)].index(selected_idx)
-            pt = obs_points[idx]
-            pt_key = tuple(pt)
-
-            col1, col2 = st.columns(2)
-
-            with col1:
-                st.subheader('时域波形')
-                if pt_key in result.observation_data:
-                    fig_time = plot_time_waveform(
-                        result.observation_times,
-                        result.observation_data[pt_key],
-                        point_label=f'({pt[0]}, {pt[1]})',
-                        title='Ez 随时间变化'
-                    )
-                    st.pyplot(fig_time)
-                    plt.close(fig_time)
-                else:
-                    st.info('无观测数据')
-
-            with col2:
-                st.subheader('频谱分析')
-                if pt_key in result.observation_data:
-                    fig_spec = plot_frequency_spectrum(
-                        result.observation_times,
-                        result.observation_data[pt_key],
-                        title='频率响应'
-                    )
-                    st.pyplot(fig_spec)
-                    plt.close(fig_spec)
-                else:
-                    st.info('无观测数据')
-
-            st.divider()
-            st.subheader('所有观测点对比')
-            fig, ax = plt.subplots(figsize=(10, 4))
-            for i, opt in enumerate(obs_points):
-                opt_key = tuple(opt)
-                if opt_key in result.observation_data:
-                    ax.plot(result.observation_times * 1e9, result.observation_data[opt_key],
-                            label=f'点{i+1} ({opt[0]},{opt[1]})', linewidth=1)
-            ax.set_xlabel('Time (ns)')
-            ax.set_ylabel('Ez (V/m)')
-            ax.set_title('多观测点对比')
-            ax.legend()
-            ax.grid(True, alpha=0.3)
-            plt.tight_layout()
-            st.pyplot(fig)
-            plt.close(fig)
+        if not has_field_result:
+            st.info('请先点击侧边栏的"运行仿真"按钮运行普通FDTD仿真，以查看时域/频域分析结果。')
         else:
-            st.info('请先添加观测点')
+            obs_points = st.session_state.observation_points
+            if obs_points and result.observation_data:
+                selected_idx = st.selectbox('选择观测点',
+                                            [f'点 {i+1}: ({pt[0]}, {pt[1]})' for i, pt in enumerate(obs_points)],
+                                            key='obs_select')
+                idx = [f'点 {i+1}: ({pt[0]}, {pt[1]})' for i, pt in enumerate(obs_points)].index(selected_idx)
+                pt = obs_points[idx]
+                pt_key = tuple(pt)
+
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    st.subheader('时域波形')
+                    if pt_key in result.observation_data:
+                        fig_time = plot_time_waveform(
+                            result.observation_times,
+                            result.observation_data[pt_key],
+                            point_label=f'({pt[0]}, {pt[1]})',
+                            title='Ez 随时间变化'
+                        )
+                        st.pyplot(fig_time)
+                        plt.close(fig_time)
+                    else:
+                        st.info('无观测数据')
+
+                with col2:
+                    st.subheader('频谱分析')
+                    if pt_key in result.observation_data:
+                        fig_spec = plot_frequency_spectrum(
+                            result.observation_times,
+                            result.observation_data[pt_key],
+                            title='频率响应'
+                        )
+                        st.pyplot(fig_spec)
+                        plt.close(fig_spec)
+                    else:
+                        st.info('无观测数据')
+
+                st.divider()
+                st.subheader('所有观测点对比')
+                fig, ax = plt.subplots(figsize=(10, 4))
+                for i, opt in enumerate(obs_points):
+                    opt_key = tuple(opt)
+                    if opt_key in result.observation_data:
+                        ax.plot(result.observation_times * 1e9, result.observation_data[opt_key],
+                                label=f'点{i+1} ({opt[0]},{opt[1]})', linewidth=1)
+                ax.set_xlabel('Time (ns)')
+                ax.set_ylabel('Ez (V/m)')
+                ax.set_title('多观测点对比')
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+                plt.tight_layout()
+                st.pyplot(fig)
+                plt.close(fig)
+            else:
+                st.info('请先添加观测点')
 
     with tab3:
-        if st.session_state.far_field_result is not None:
+        if not has_field_result:
+            st.info('请先点击侧边栏的"运行仿真"按钮运行普通FDTD仿真，以查看远场分析结果。')
+        elif st.session_state.far_field_result is not None:
             angles, ff_mag, rcs_db = st.session_state.far_field_result
 
             col1, col2 = st.columns(2)
