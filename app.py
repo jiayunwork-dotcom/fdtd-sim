@@ -23,18 +23,23 @@ from fdtd import (
     Source, Waveform, TFSF, SourceManager,
     BoundaryCondition, CPML,
     NearFarFieldTransform,
-    list_templates, get_template
+    list_templates, get_template,
+    Port, SParameterConfig, SParameterResult, SParameterExtractor,
+    compute_tdr
 )
 from fdtd.visualization import (
     plot_field_heatmap, plot_time_waveform, plot_frequency_spectrum,
     plot_far_field_polar, plot_rcs, plot_energy_density,
     fig_to_image, fig_to_bytes, generate_animation_frames, save_gif,
-    plot_parametric_sweep
+    plot_parametric_sweep,
+    plot_sparam_magnitude, plot_sparam_phase, plot_smith_chart,
+    plot_tdr, plot_port_time_signals
 )
 from fdtd.io_utils import (
     export_config_json, import_config_json,
     export_all_fields_csv, export_far_field_csv,
-    export_observation_csv, export_energy_csv
+    export_observation_csv, export_energy_csv,
+    export_sparam_touchstone, export_sparam_csv, get_sparam_filename
 )
 from fdtd.parametric_sweep import ParametricSweep, SweepConfig
 
@@ -100,6 +105,11 @@ def init_state():
 
         st.session_state.bookmarks = []
         st.session_state.convergence_result = None
+
+        st.session_state.sparam_ports = []
+        st.session_state.sparam_config = SParameterConfig()
+        st.session_state.sparam_result = None
+        st.session_state.sparam_analysis_tab = 0
 
 
 def unit_to_factor(unit):
@@ -673,6 +683,224 @@ with st.sidebar:
             except Exception as e:
                 st.error(f'导入失败: {e}')
 
+    with st.expander('📊 S参数分析', expanded=False):
+        st.caption('定义端口并提取S参数')
+        sparam_config = st.session_state.sparam_config
+        sparam_ports = st.session_state.sparam_ports
+
+        st.subheader('激励信号配置')
+        col1, col2 = st.columns(2)
+        with col1:
+            sparam_center_freq = st.number_input(
+                '中心频率 (THz)',
+                value=sparam_config.center_frequency / 1e12,
+                min_value=0.1, max_value=1000.0, step=0.1,
+                key='sparam_center_freq'
+            )
+            sparam_config.center_frequency = sparam_center_freq * 1e12
+        with col2:
+            sparam_bw = st.number_input(
+                '带宽 (THz)',
+                value=sparam_config.bandwidth / 1e12,
+                min_value=0.1, max_value=500.0, step=0.1,
+                key='sparam_bw'
+            )
+            sparam_config.bandwidth = sparam_bw * 1e12
+
+        sparam_amp = st.number_input(
+            '激励幅值',
+            value=sparam_config.amplitude,
+            min_value=0.01, max_value=1000.0, step=0.1,
+            key='sparam_amp'
+        )
+        sparam_config.amplitude = sparam_amp
+
+        st.divider()
+        st.subheader('端口定义')
+        nx = config.nx
+        ny = config.ny
+
+        num_ports = st.number_input(
+            '端口数量',
+            value=max(2, len(sparam_ports)),
+            min_value=2, max_value=8, step=1,
+            key='sparam_num_ports'
+        )
+        num_ports = int(num_ports)
+
+        while len(sparam_ports) < num_ports:
+            default_x = int(nx // 4 + (len(sparam_ports) % 2) * nx // 2)
+            default_y = int(ny // 2)
+            default_dir = '+x' if len(sparam_ports) % 2 == 0 else '-x'
+            new_port = Port(
+                port_index=len(sparam_ports),
+                position=(default_x, default_y),
+                direction=default_dir,
+                z0=50.0,
+                width=3
+            )
+            sparam_ports.append(new_port)
+
+        while len(sparam_ports) > num_ports:
+            sparam_ports.pop()
+
+        for idx, port in enumerate(sparam_ports):
+            st.markdown(f'**端口 {idx + 1}**')
+            col_p1, col_p2, col_p3 = st.columns(3)
+            with col_p1:
+                px = st.number_input(
+                    f'X位置',
+                    value=port.position[0],
+                    min_value=2, max_value=nx - 3,
+                    key=f'port_{idx}_x'
+                )
+            with col_p2:
+                py = st.number_input(
+                    f'Y位置',
+                    value=port.position[1],
+                    min_value=2, max_value=ny - 3,
+                    key=f'port_{idx}_y'
+                )
+            with col_p3:
+                pdir = st.selectbox(
+                    f'方向',
+                    ['+x', '-x', '+y', '-y'],
+                    index=['+x', '-x', '+y', '-y'].index(port.direction),
+                    key=f'port_{idx}_dir'
+                )
+
+            col_p4, col_p5 = st.columns(2)
+            with col_p4:
+                pz0 = st.number_input(
+                    f'参考阻抗 (Ω)',
+                    value=port.z0,
+                    min_value=1.0, max_value=1000.0, step=1.0,
+                    key=f'port_{idx}_z0'
+                )
+            with col_p5:
+                pwidth = st.number_input(
+                    f'端口宽度 (网格)',
+                    value=port.width,
+                    min_value=1, max_value=11, step=2,
+                    key=f'port_{idx}_width'
+                )
+
+            port.position = (int(px), int(py))
+            port.direction = pdir
+            port.z0 = float(pz0)
+            port.width = int(pwidth)
+
+        if sparam_ports:
+            st.divider()
+            st.subheader('端口位置预览')
+            try:
+                fdtd_preview = FDTD2D(
+                    copy.deepcopy(config),
+                    copy.deepcopy(st.session_state.material_lib),
+                    copy.deepcopy(st.session_state.structure_mgr),
+                    copy.deepcopy(st.session_state.source_mgr),
+                    copy.deepcopy(st.session_state.boundary)
+                )
+                color_grid = fdtd_preview.get_color_grid_physical()
+                fig, ax = plt.subplots(figsize=(6, 5))
+                factor = factor_to_unit(config.unit)
+                extent = [0, config.ny * config.dy * factor, 0, config.nx * config.dx * factor]
+                ax.imshow(color_grid.transpose(1, 0, 2), extent=extent, origin='lower', alpha=0.7)
+
+                port_colors = ['red', 'blue', 'green', 'orange', 'purple', 'cyan', 'magenta', 'yellow']
+                for idx, port in enumerate(sparam_ports):
+                    px, py = port.position
+                    color = port_colors[idx % len(port_colors)]
+                    dx_val = 0.5
+                    if port.direction == '+x':
+                        ax.arrow(py * config.dy * factor, px * config.dx * factor,
+                                 dx_val * config.dy * factor, 0,
+                                 head_width=0.8, head_length=0.8, fc=color, ec=color, linewidth=2)
+                    elif port.direction == '-x':
+                        ax.arrow(py * config.dy * factor, px * config.dx * factor,
+                                 -dx_val * config.dy * factor, 0,
+                                 head_width=0.8, head_length=0.8, fc=color, ec=color, linewidth=2)
+                    elif port.direction == '+y':
+                        ax.arrow(py * config.dy * factor, px * config.dx * factor,
+                                 0, dx_val * config.dx * factor,
+                                 head_width=0.8, head_length=0.8, fc=color, ec=color, linewidth=2)
+                    elif port.direction == '-y':
+                        ax.arrow(py * config.dy * factor, px * config.dx * factor,
+                                 0, -dx_val * config.dx * factor,
+                                 head_width=0.8, head_length=0.8, fc=color, ec=color, linewidth=2)
+                    ax.plot(py * config.dy * factor, px * config.dx * factor, 'o',
+                            color=color, markersize=8, markeredgecolor='white',
+                            label=f'Port {idx + 1} (Z0={port.z0}Ω)')
+
+                ax.set_xlabel(f'Y ({config.unit})')
+                ax.set_ylabel(f'X ({config.unit})')
+                ax.set_title('端口位置')
+                ax.set_aspect('equal')
+                ax.legend(loc='best', fontsize=8)
+                plt.tight_layout()
+                st.pyplot(fig)
+                plt.close(fig)
+            except Exception as e:
+                st.warning(f'端口预览失败: {e}')
+
+        st.divider()
+
+        run_sparam_disabled = (
+            len(sparam_ports) < 2 or
+            (st.session_state.config.dt is not None and not st.session_state.config.is_stable())
+        )
+
+        if st.button('📊 运行S参数提取', key='run_sparam_btn',
+                     use_container_width=True, type='primary',
+                     disabled=run_sparam_disabled):
+            with st.spinner('正在运行S参数提取...'):
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+
+                def sparam_progress_cb(excite_idx, num_ports, current_step, total_steps):
+                    overall_progress = (excite_idx * total_steps + current_step) / (num_ports * total_steps)
+                    progress_bar.progress(overall_progress)
+                    status_text.text(f'仿真 {excite_idx + 1}/{num_ports}: 时间步 {current_step}/{total_steps}')
+
+                try:
+                    config_copy = copy.deepcopy(st.session_state.config)
+                    mat_lib_copy = copy.deepcopy(st.session_state.material_lib)
+                    struct_copy = copy.deepcopy(st.session_state.structure_mgr)
+                    bc_copy = copy.deepcopy(st.session_state.boundary)
+                    ports_copy = [copy.deepcopy(p) for p in sparam_ports]
+
+                    extractor = SParameterExtractor(
+                        config=config_copy,
+                        material_lib=mat_lib_copy,
+                        structure_mgr=struct_copy,
+                        boundary=bc_copy,
+                        ports=ports_copy,
+                        sparam_config=copy.deepcopy(sparam_config)
+                    )
+
+                    sparam_result = extractor.extract(progress_callback=sparam_progress_cb)
+                    st.session_state.sparam_result = sparam_result
+
+                    status_text.empty()
+                    progress_bar.empty()
+
+                    if sparam_result.warnings:
+                        for warning in sparam_result.warnings:
+                            st.warning(warning)
+
+                    st.success(f'S参数提取完成! 耗时: {sparam_result.computation_time:.2f}s')
+                    st.rerun()
+
+                except Exception as e:
+                    status_text.empty()
+                    progress_bar.empty()
+                    st.error(f'S参数提取失败: {e}')
+
+        if st.session_state.sparam_result is not None:
+            if st.button('🔄 清除S参数结果', key='clear_sparam_btn', use_container_width=True):
+                st.session_state.sparam_result = None
+                st.rerun()
+
     st.divider()
 
     col1, col2 = st.columns(2)
@@ -821,7 +1049,9 @@ if result is None:
         """)
 
 else:
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(['🖼️ 场分布', '📈 时域/频域', '📡 远场', '⚡ 参数扫描', '📐 收敛性分析'])
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+        ['🖼️ 场分布', '📈 时域/频域', '📡 远场', '⚡ 参数扫描', '📐 收敛性分析', '📊 S参数']
+    )
 
     with tab1:
         if compare_mode and st.session_state.compare_result is not None:
@@ -1480,6 +1710,223 @@ else:
                     st.metric(f"{res['factor']}x 密度", f"{res['nx']}×{res['ny']}")
                     st.metric('计算耗时', f"{res['computation_time']:.2f}s")
                     st.caption(f"dx={res['dx']*1e6:.3f}um")
+
+    with tab6:
+        sparam_result = st.session_state.sparam_result
+        if sparam_result is None:
+            st.info('请在左侧侧边栏的"S参数分析"面板中配置端口并运行S参数提取')
+            st.subheader('使用说明')
+            st.markdown("""
+            **S参数提取流程：**
+            1. 在左侧侧边栏展开"📊 S参数分析"面板
+            2. 配置激励信号的中心频率和带宽
+            3. 定义2个或多个端口，设置位置、方向和参考阻抗
+            4. 点击"📊 运行S参数提取"按钮
+            5. 等待N次仿真完成（N=端口数量）
+            6. 查看S参数幅度、相位、史密斯圆图和TDR结果
+
+            **功能特性：**
+            - 基于传输线理论的入射波/反射波分离
+            - 广义S参数计算（支持不同参考阻抗）
+            - 无源性和互易性自动检查
+            - Touchstone 2.0和CSV格式导出
+            - 时域反射(TDR)分析
+            """)
+        else:
+            st.subheader('📊 S参数分析结果')
+            num_ports = sparam_result.num_ports
+
+            status_cols = st.columns(4)
+            with status_cols[0]:
+                st.metric('端口数量', f'{num_ports}')
+            with status_cols[1]:
+                valid_count = np.sum(sparam_result.valid_bandwidth_mask)
+                total_freq = len(sparam_result.frequencies)
+                st.metric('有效频点数', f'{valid_count}/{total_freq}')
+            with status_cols[2]:
+                passivity_violations = np.sum(sparam_result.passivity_violation_mask)
+                if passivity_violations > 0:
+                    st.metric('无源性违规', f'{passivity_violations}', delta_color='inverse')
+                else:
+                    st.metric('无源性', '✅ 满足')
+            with status_cols[3]:
+                reciprocity_violations = np.sum(sparam_result.reciprocity_violation_mask)
+                if reciprocity_violations > 0:
+                    st.metric('互易性违规', f'{reciprocity_violations}', delta_color='inverse')
+                else:
+                    st.metric('互易性', '✅ 满足')
+
+            if sparam_result.warnings:
+                with st.expander('⚠️ 警告信息', expanded=True):
+                    for warning in sparam_result.warnings:
+                        st.warning(warning)
+
+            if np.any(sparam_result.passivity_violation_mask):
+                st.error('⚠️ 部分频点违反无源性条件，结果可能不可靠。已在图表中用红色标记。')
+            if np.any(sparam_result.reciprocity_violation_mask):
+                st.warning('⚠️ 部分频点违反互易性条件。')
+
+            st.divider()
+
+            sparam_tab1, sparam_tab2, sparam_tab3, sparam_tab4, sparam_tab5 = st.tabs(
+                ['📈 幅度', '📐 相位', '🔄 史密斯圆图', '⏱️ TDR', '📤 导出']
+            )
+
+            with sparam_tab1:
+                st.subheader('S参数幅度 (dB)')
+                col_mag1, col_mag2 = st.columns([3, 1])
+                with col_mag2:
+                    freq_unit_mag = st.selectbox('频率单位', ['GHz', 'THz', 'MHz'], key='mag_freq_unit')
+                    y_min = st.number_input('Y轴最小值 (dB)', value=-60.0, min_value=-100.0, max_value=0.0, step=5.0)
+                    y_max = st.number_input('Y轴最大值 (dB)', value=5.0, min_value=-20.0, max_value=20.0, step=5.0)
+                    show_invalid = st.checkbox('显示超带宽数据(灰色虚线)', value=True)
+
+                with col_mag1:
+                    fig_mag = plot_sparam_magnitude(
+                        sparam_result,
+                        frequency_unit=freq_unit_mag,
+                        y_min=y_min, y_max=y_max,
+                        show_invalid=show_invalid
+                    )
+                    st.pyplot(fig_mag)
+                    plt.close(fig_mag)
+
+            with sparam_tab2:
+                st.subheader('S参数相位 (度)')
+                col_phase1, col_phase2 = st.columns([3, 1])
+                with col_phase2:
+                    freq_unit_phase = st.selectbox('频率单位', ['GHz', 'THz', 'MHz'], key='phase_freq_unit')
+                    unwrap_phase = st.checkbox('相位展开', value=True)
+                    show_invalid_phase = st.checkbox('显示超带宽数据', value=True)
+
+                with col_phase1:
+                    fig_phase = plot_sparam_phase(
+                        sparam_result,
+                        frequency_unit=freq_unit_phase,
+                        unwrap=unwrap_phase,
+                        show_invalid=show_invalid_phase
+                    )
+                    st.pyplot(fig_phase)
+                    plt.close(fig_phase)
+
+            with sparam_tab3:
+                st.subheader('史密斯圆图')
+                col_smith1, col_smith2 = st.columns([3, 1])
+                with col_smith2:
+                    smith_ports = st.multiselect(
+                        '选择端口 (Sii)',
+                        list(range(1, num_ports + 1)),
+                        default=[1, 2] if num_ports >= 2 else [1],
+                        key='smith_ports'
+                    )
+                    num_markers = st.number_input('频率标记点数量', value=10, min_value=0, max_value=20, step=1)
+
+                with col_smith1:
+                    port_indices = [p - 1 for p in smith_ports]
+                    fig_smith = plot_smith_chart(
+                        sparam_result,
+                        port_indices=port_indices if port_indices else None,
+                        num_markers=int(num_markers)
+                    )
+                    st.pyplot(fig_smith)
+                    plt.close(fig_smith)
+
+            with sparam_tab4:
+                st.subheader('时域反射 (TDR)')
+                col_tdr1, col_tdr2 = st.columns([3, 1])
+                with col_tdr2:
+                    tdr_port = st.selectbox(
+                        '分析端口',
+                        list(range(1, num_ports + 1)),
+                        key='tdr_port'
+                    )
+                    dist_unit = st.selectbox('距离单位', ['mm', 'cm', 'um', 'm'], key='dist_unit')
+                    z0_tdr = sparam_result.ports[tdr_port - 1].z0
+
+                with col_tdr1:
+                    dist, impedance = compute_tdr(
+                        sparam_result,
+                        port_idx=tdr_port - 1,
+                        impedance_ref=z0_tdr
+                    )
+                    fig_tdr = plot_tdr(
+                        dist, impedance,
+                        distance_unit=dist_unit,
+                        z0=z0_tdr,
+                        title=f'TDR Response - Port {tdr_port}'
+                    )
+                    st.pyplot(fig_tdr)
+                    plt.close(fig_tdr)
+
+                st.info('💡 TDR图显示沿传输线的阻抗分布。阻抗偏离Z0的位置表示存在反射。')
+
+            with sparam_tab5:
+                st.subheader('数据导出')
+
+                col_exp_a, col_exp_b = st.columns(2)
+
+                with col_exp_a:
+                    st.markdown('### Touchstone 格式 (.snp)')
+                    ts_format = st.selectbox(
+                        '参数格式',
+                        ['MA', 'DB', 'RI'],
+                        format_func=lambda x: {
+                            'MA': '幅度/相位 (Magnitude/Angle)',
+                            'DB': 'dB幅度/相位 (dB Magnitude/Angle)',
+                            'RI': '实部/虚部 (Real/Imaginary)'
+                        }[x],
+                        key='ts_format'
+                    )
+                    ts_freq_unit = st.selectbox(
+                        '频率单位',
+                        ['GHz', 'THz', 'MHz', 'kHz', 'Hz'],
+                        key='ts_freq_unit'
+                    )
+                    ts_valid_only = st.checkbox('仅导出有效带宽内数据', value=True, key='ts_valid')
+
+                    ts_data = export_sparam_touchstone(
+                        sparam_result,
+                        parameter_format=ts_format,
+                        frequency_unit=ts_freq_unit,
+                        valid_only=ts_valid_only
+                    )
+                    ts_filename = get_sparam_filename(num_ports, format='touchstone')
+
+                    st.download_button(
+                        '💾 下载 Touchstone 文件',
+                        data=ts_data,
+                        file_name=ts_filename,
+                        mime='text/plain',
+                        use_container_width=True
+                    )
+
+                with col_exp_b:
+                    st.markdown('### CSV 格式')
+                    csv_valid_only = st.checkbox('仅导出有效带宽内数据', value=True, key='csv_valid')
+
+                    csv_data = export_sparam_csv(
+                        sparam_result,
+                        valid_only=csv_valid_only
+                    )
+
+                    st.download_button(
+                        '💾 下载 CSV 文件',
+                        data=csv_data,
+                        file_name='fdtd_sparam.csv',
+                        mime='text/csv',
+                        use_container_width=True
+                    )
+
+                st.divider()
+                st.subheader('端口信息')
+                port_info_cols = st.columns(num_ports)
+                for i, port in enumerate(sparam_result.ports):
+                    with port_info_cols[i]:
+                        st.markdown(f'**端口 {i + 1}**')
+                        st.write(f'位置: {port.position}')
+                        st.write(f'方向: {port.direction}')
+                        st.write(f'参考阻抗: {port.z0} Ω')
+                        st.write(f'宽度: {port.width} 网格')
 
     st.divider()
 
