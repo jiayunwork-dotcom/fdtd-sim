@@ -419,3 +419,161 @@ def plot_port_time_signals(s_result, port_idx: int = 0,
     plt.tight_layout()
     return fig
 
+
+def plot_sparam_magnitude_deembedded(s_result, s_deembedded,
+                                      frequency_unit: str = 'GHz',
+                                      y_min: float = -60.0, y_max: float = 5.0,
+                                      show_invalid: bool = True) -> plt.Figure:
+    from .sparam import SParameterResult
+    fig, ax = plt.subplots(figsize=(10, 6))
+    freq_scale = {
+        'Hz': 1.0, 'kHz': 1e3, 'MHz': 1e6, 'GHz': 1e9, 'THz': 1e12
+    }[frequency_unit]
+    colors = plt.cm.tab10(np.linspace(0, 1, s_result.num_ports ** 2))
+    color_idx = 0
+    frequencies = s_result.frequencies / freq_scale
+    valid_mask = s_result.valid_bandwidth_mask
+
+    for i in range(s_result.num_ports):
+        for j in range(s_result.num_ports):
+            color = colors[color_idx]
+
+            s_ij_orig = s_result.s_matrix[i, j, :]
+            mag_db_orig = 20 * np.log10(np.abs(s_ij_orig) + 1e-30)
+            ax.plot(frequencies[valid_mask], mag_db_orig[valid_mask],
+                    color=color, linewidth=1.5, linestyle='-',
+                    label=f'S{i+1}{j+1} 原始')
+
+            s_ij_deemb = s_deembedded[i, j, :]
+            mag_db_deemb = 20 * np.log10(np.abs(s_ij_deemb) + 1e-30)
+            ax.plot(frequencies[valid_mask], mag_db_deemb[valid_mask],
+                    color=color, linewidth=1.5, linestyle='--',
+                    label=f'S{i+1}{j+1} 去嵌后')
+
+            if show_invalid and np.any(~valid_mask):
+                ax.plot(frequencies[~valid_mask], mag_db_orig[~valid_mask],
+                        color=color, linewidth=1.0, linestyle=':', alpha=0.3)
+                ax.plot(frequencies[~valid_mask], mag_db_deemb[~valid_mask],
+                        color=color, linewidth=1.0, linestyle=':', alpha=0.3)
+
+            color_idx += 1
+
+    ax.set_xlabel(f'Frequency ({frequency_unit})')
+    ax.set_ylabel('Magnitude (dB)')
+    ax.set_title('S-Parameters - Magnitude (Original vs De-embedded)')
+    ax.set_ylim(y_min, y_max)
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc='best', fontsize=8, ncol=2)
+    plt.tight_layout()
+    return fig
+
+
+def plot_sparam_phase_deembedded(s_result, s_deembedded,
+                                  frequency_unit: str = 'GHz',
+                                  unwrap: bool = True,
+                                  show_invalid: bool = True) -> plt.Figure:
+    from .sparam import SParameterResult
+    fig, ax = plt.subplots(figsize=(10, 6))
+    freq_scale = {
+        'Hz': 1.0, 'kHz': 1e3, 'MHz': 1e6, 'GHz': 1e9, 'THz': 1e12
+    }[frequency_unit]
+    colors = plt.cm.tab10(np.linspace(0, 1, s_result.num_ports ** 2))
+    color_idx = 0
+    frequencies = s_result.frequencies / freq_scale
+    valid_mask = s_result.valid_bandwidth_mask
+
+    for i in range(s_result.num_ports):
+        for j in range(s_result.num_ports):
+            color = colors[color_idx]
+
+            s_ij_orig = s_result.s_matrix[i, j, :]
+            phase_orig = np.angle(s_ij_orig, deg=True)
+            if unwrap:
+                phase_orig = np.unwrap(phase_orig, period=360)
+            ax.plot(frequencies[valid_mask], phase_orig[valid_mask],
+                    color=color, linewidth=1.5, linestyle='-',
+                    label=f'S{i+1}{j+1} 原始')
+
+            s_ij_deemb = s_deembedded[i, j, :]
+            phase_deemb = np.angle(s_ij_deemb, deg=True)
+            if unwrap:
+                phase_deemb = np.unwrap(phase_deemb, period=360)
+            ax.plot(frequencies[valid_mask], phase_deemb[valid_mask],
+                    color=color, linewidth=1.5, linestyle='--',
+                    label=f'S{i+1}{j+1} 去嵌后')
+
+            if show_invalid and np.any(~valid_mask):
+                ax.plot(frequencies[~valid_mask], phase_orig[~valid_mask],
+                        color=color, linewidth=1.0, linestyle=':', alpha=0.3)
+                ax.plot(frequencies[~valid_mask], phase_deemb[~valid_mask],
+                        color=color, linewidth=1.0, linestyle=':', alpha=0.3)
+
+            color_idx += 1
+
+    ax.set_xlabel(f'Frequency ({frequency_unit})')
+    ax.set_ylabel('Phase (degrees)')
+    ax.set_title('S-Parameters - Phase (Original vs De-embedded)')
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc='best', fontsize=8, ncol=2)
+    plt.tight_layout()
+    return fig
+
+
+def plot_mixed_mode_s_parameters(Sdd: np.ndarray, Sdc: np.ndarray,
+                                   Scd: np.ndarray, Scc: np.ndarray,
+                                   frequencies: np.ndarray,
+                                   valid_mask: np.ndarray,
+                                   frequency_unit: str = 'GHz',
+                                   param_type: str = 'magnitude',
+                                   y_min: float = -60.0, y_max: float = 5.0,
+                                   unwrap_phase: bool = True) -> plt.Figure:
+    fig, ax = plt.subplots(figsize=(10, 6))
+    freq_scale = {
+        'Hz': 1.0, 'kHz': 1e3, 'MHz': 1e6, 'GHz': 1e9, 'THz': 1e12
+    }[frequency_unit]
+    freq_plot = frequencies / freq_scale
+    n = Sdd.shape[0]
+
+    linestyles = ['-', '--', '-.', ':']
+    colors = plt.cm.tab10(np.linspace(0, 1, 4))
+
+    matrices = [
+        ('Sdd', Sdd, colors[0]),
+        ('Sdc', Sdc, colors[1]),
+        ('Scd', Scd, colors[2]),
+        ('Scc', Scc, colors[3]),
+    ]
+
+    for mat_name, mat, color in matrices:
+        for i in range(n):
+            for j in range(n):
+                s_ij = mat[i, j, :]
+                ls = linestyles[(i * n + j) % len(linestyles)]
+
+                if param_type == 'magnitude':
+                    data = 20 * np.log10(np.abs(s_ij) + 1e-30)
+                    ax.plot(freq_plot[valid_mask], data[valid_mask],
+                            color=color, linestyle=ls, linewidth=1.5,
+                            label=f'{mat_name}{i+1}{j+1}')
+                elif param_type == 'phase':
+                    data = np.angle(s_ij, deg=True)
+                    if unwrap_phase:
+                        data = np.unwrap(data, period=360)
+                    ax.plot(freq_plot[valid_mask], data[valid_mask],
+                            color=color, linestyle=ls, linewidth=1.5,
+                            label=f'{mat_name}{i+1}{j+1}')
+
+    if param_type == 'magnitude':
+        ax.set_ylabel('Magnitude (dB)')
+        ax.set_title('Mixed-Mode S-Parameters - Magnitude')
+        ax.set_ylim(y_min, y_max)
+    else:
+        ax.set_ylabel('Phase (degrees)')
+        ax.set_title('Mixed-Mode S-Parameters - Phase')
+
+    ax.set_xlabel(f'Frequency ({frequency_unit})')
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc='best', fontsize=8, ncol=2)
+    plt.tight_layout()
+    return fig
+

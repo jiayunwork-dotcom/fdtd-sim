@@ -460,3 +460,294 @@ def compute_tdr(s_result: SParameterResult, port_idx: int = 0,
     step_response = np.clip(step_response, -0.99, 0.99)
     impedance = impedance_ref * (1 + step_response) / (1 - step_response)
     return dist_arr, impedance
+
+
+def s_to_z(s_matrix: np.ndarray, z0: float = 50.0) -> np.ndarray:
+    n = s_matrix.shape[0]
+    nf = s_matrix.shape[2]
+    z_matrix = np.zeros_like(s_matrix)
+    I = np.eye(n, dtype=complex)
+    for f in range(nf):
+        S_f = s_matrix[:, :, f]
+        Z_f = z0 * (I + S_f) @ np.linalg.inv(I - S_f)
+        z_matrix[:, :, f] = Z_f
+    return z_matrix
+
+
+def z_to_s(z_matrix: np.ndarray, z0: float = 50.0) -> np.ndarray:
+    n = z_matrix.shape[0]
+    nf = z_matrix.shape[2]
+    s_matrix = np.zeros_like(z_matrix)
+    I = np.eye(n, dtype=complex)
+    for f in range(nf):
+        Z_f = z_matrix[:, :, f]
+        inv = np.linalg.inv(Z_f + z0 * I)
+        S_f = (Z_f - z0 * I) @ inv
+        s_matrix[:, :, f] = S_f
+    return s_matrix
+
+
+def s_to_y(s_matrix: np.ndarray, z0: float = 50.0) -> np.ndarray:
+    n = s_matrix.shape[0]
+    nf = s_matrix.shape[2]
+    y_matrix = np.zeros_like(s_matrix)
+    I = np.eye(n, dtype=complex)
+    for f in range(nf):
+        S_f = s_matrix[:, :, f]
+        Y_f = (1.0 / z0) * (I - S_f) @ np.linalg.inv(I + S_f)
+        y_matrix[:, :, f] = Y_f
+    return y_matrix
+
+
+def y_to_s(y_matrix: np.ndarray, z0: float = 50.0) -> np.ndarray:
+    n = y_matrix.shape[0]
+    nf = y_matrix.shape[2]
+    s_matrix = np.zeros_like(y_matrix)
+    I = np.eye(n, dtype=complex)
+    for f in range(nf):
+        Y_f = y_matrix[:, :, f]
+        inv = np.linalg.inv(I + z0 * Y_f)
+        S_f = (I - z0 * Y_f) @ inv
+        s_matrix[:, :, f] = S_f
+    return s_matrix
+
+
+def s_to_abcd(s_matrix: np.ndarray, z0: float = 50.0) -> np.ndarray:
+    n = s_matrix.shape[0]
+    nf = s_matrix.shape[2]
+    abcd_matrix = np.zeros_like(s_matrix)
+    if n != 2:
+        raise ValueError("S to ABCD conversion is only valid for 2-port networks")
+    for f in range(nf):
+        S = s_matrix[:, :, f]
+        s11, s12, s21, s22 = S[0, 0], S[0, 1], S[1, 0], S[1, 1]
+        denom = 2 * s21
+        A = ((1 + s11) * (1 - s22) + s12 * s21) / denom
+        B = z0 * ((1 + s11) * (1 + s22) - s12 * s21) / denom
+        C = (1.0 / z0) * ((1 - s11) * (1 - s22) - s12 * s21) / denom
+        D = ((1 - s11) * (1 + s22) + s12 * s21) / denom
+        abcd_matrix[:, :, f] = np.array([[A, B], [C, D]], dtype=complex)
+    return abcd_matrix
+
+
+def abcd_to_s(abcd_matrix: np.ndarray, z0: float = 50.0) -> np.ndarray:
+    n = abcd_matrix.shape[0]
+    nf = abcd_matrix.shape[2]
+    s_matrix = np.zeros_like(abcd_matrix)
+    if n != 2:
+        raise ValueError("ABCD to S conversion is only valid for 2-port networks")
+    for f in range(nf):
+        A = abcd_matrix[0, 0, f]
+        B = abcd_matrix[0, 1, f]
+        C = abcd_matrix[1, 0, f]
+        D = abcd_matrix[1, 1, f]
+        denom = A + B / z0 + C * z0 + D
+        s11 = (A + B / z0 - C * z0 - D) / denom
+        s12 = 2 * (A * D - B * C) / denom
+        s21 = 2 / denom
+        s22 = (-A + B / z0 - C * z0 + D) / denom
+        s_matrix[:, :, f] = np.array([[s11, s12], [s21, s22]], dtype=complex)
+    return s_matrix
+
+
+def transmission_line_abcd(theta: float, z0_line: float = 50.0) -> np.ndarray:
+    cos_theta = np.cos(theta)
+    sin_theta = np.sin(theta)
+    return np.array([
+        [cos_theta, 1j * z0_line * sin_theta],
+        [1j * sin_theta / z0_line, cos_theta]
+    ], dtype=complex)
+
+
+def compute_theta_from_electrical_length(elec_length_deg: float, f_ref: float, frequencies: np.ndarray) -> np.ndarray:
+    theta_ref = np.radians(elec_length_deg)
+    theta = theta_ref * frequencies / f_ref
+    return theta
+
+
+def deembed_s_parameters(s_matrix: np.ndarray,
+                          port_params: List[Dict],
+                          frequencies: np.ndarray,
+                          z0: float = 50.0) -> np.ndarray:
+    n = s_matrix.shape[0]
+    nf = s_matrix.shape[2]
+    s_deembedded = np.zeros_like(s_matrix)
+
+    port_abcd_inv = []
+    for p in range(n):
+        params = port_params[p]
+        elec_length = params.get('elec_length', 0.0)
+        z0_line = params.get('z0_line', z0)
+        f_ref = params.get('f_ref', frequencies[0] if len(frequencies) > 0 else 1e9)
+        enabled = params.get('enabled', True)
+
+        if not enabled or elec_length == 0:
+            port_abcd_inv.append(None)
+            continue
+
+        theta = compute_theta_from_electrical_length(elec_length, f_ref, frequencies)
+        inv_list = []
+        for f in range(nf):
+            abcd = transmission_line_abcd(theta[f], z0_line)
+            inv_list.append(np.linalg.inv(abcd))
+        port_abcd_inv.append(inv_list)
+
+    if n == 2:
+        for f in range(nf):
+            S_f = s_matrix[:, :, f]
+            S_deemb = S_f.copy()
+
+            if port_abcd_inv[0] is not None or port_abcd_inv[1] is not None:
+                s_for_abcd = S_f.reshape(2, 2, 1)
+                abcd = s_to_abcd(s_for_abcd, z0)[:, :, 0]
+
+                if port_abcd_inv[0] is not None:
+                    abcd = port_abcd_inv[0][f] @ abcd
+                if port_abcd_inv[1] is not None:
+                    abcd = abcd @ port_abcd_inv[1][f]
+
+                abcd_for_s = abcd.reshape(2, 2, 1)
+                S_deemb = abcd_to_s(abcd_for_s, z0)[:, :, 0]
+
+            s_deembedded[:, :, f] = S_deemb
+    else:
+        for p in range(n):
+            if port_abcd_inv[p] is None:
+                continue
+
+            for f in range(nf):
+                S_f = s_matrix[:, :, f].copy()
+
+                phi = np.angle(S_f[p, p])
+                theta_f = np.angle(port_abcd_inv[p][f][0, 0]) if port_abcd_inv[p][f] is not None else 0
+
+                for i in range(n):
+                    for j in range(n):
+                        if i == p and j == p:
+                            s_deembedded[i, j, f] = S_f[i, j] * np.exp(-2j * theta_f)
+                        elif i == p:
+                            s_deembedded[i, j, f] = S_f[i, j] * np.exp(-1j * theta_f)
+                        elif j == p:
+                            s_deembedded[i, j, f] = S_f[i, j] * np.exp(-1j * theta_f)
+                        else:
+                            s_deembedded[i, j, f] = S_f[i, j]
+
+        for f in range(nf):
+            if not np.any([pi is not None for pi in port_abcd_inv]):
+                s_deembedded[:, :, f] = s_matrix[:, :, f]
+
+    return s_deembedded
+
+
+def auto_delay_calibration(s_matrix: np.ndarray,
+                            frequencies: np.ndarray,
+                            port_idx: int,
+                            freq_range: Optional[Tuple[float, float]] = None) -> Tuple[float, float, Dict]:
+    from scipy.optimize import minimize_scalar
+
+    if freq_range is None:
+        freq_range = (frequencies[0], frequencies[-1])
+
+    mask = (frequencies >= freq_range[0]) & (frequencies <= freq_range[1])
+    if not np.any(mask):
+        mask = np.ones_like(frequencies, dtype=bool)
+
+    freq_calib = frequencies[mask]
+    s11 = s_matrix[port_idx, port_idx, mask]
+    f_ref = freq_calib[len(freq_calib) // 2] if len(freq_calib) > 0 else 1e9
+
+    def phase_error(elec_length_deg):
+        theta = compute_theta_from_electrical_length(elec_length_deg, f_ref, freq_calib)
+        phase_corrected = np.angle(s11) + 2 * theta
+        phase_unwrapped = np.unwrap(phase_corrected)
+        return np.mean(phase_unwrapped ** 2)
+
+    result = minimize_scalar(
+        phase_error,
+        bounds=(-1800, 1800),
+        method='bounded'
+    )
+
+    opt_elec_length = result.x
+    final_rmse = np.sqrt(result.fun)
+
+    info = {
+        'optimized_electrical_length_deg': opt_elec_length,
+        'reference_frequency_hz': f_ref,
+        'calibration_frequency_range_hz': freq_range,
+        'rmse_deg': final_rmse,
+        'num_frequency_points': np.sum(mask),
+        'port_index': port_idx
+    }
+
+    return opt_elec_length, f_ref, info
+
+
+def convert_network_parameters(s_matrix: np.ndarray,
+                                from_type: str,
+                                to_type: str,
+                                z0: float = 50.0) -> np.ndarray:
+    from_type = from_type.upper()
+    to_type = to_type.upper()
+
+    if from_type == to_type:
+        return s_matrix.copy()
+
+    if from_type == 'S':
+        current = s_matrix
+    elif from_type == 'Z':
+        current = z_to_s(s_matrix, z0)
+    elif from_type == 'Y':
+        current = y_to_s(s_matrix, z0)
+    elif from_type == 'ABCD':
+        current = abcd_to_s(s_matrix, z0)
+    else:
+        raise ValueError(f"Unknown source type: {from_type}")
+
+    if to_type == 'S':
+        return current
+    elif to_type == 'Z':
+        return s_to_z(current, z0)
+    elif to_type == 'Y':
+        return s_to_y(current, z0)
+    elif to_type == 'ABCD':
+        return s_to_abcd(current, z0)
+    else:
+        raise ValueError(f"Unknown target type: {to_type}")
+
+
+def get_mixed_mode_conversion_matrix(n_ports: int) -> np.ndarray:
+    if n_ports % 2 != 0:
+        raise ValueError("Mixed-mode conversion requires even number of ports")
+
+    n_diff = n_ports // 2
+    M = np.zeros((n_ports, n_ports), dtype=complex)
+    m2 = np.array([[1, -1], [1, 1]], dtype=complex) / np.sqrt(2)
+
+    for i in range(n_diff):
+        M[2*i:2*i+2, 2*i:2*i+2] = m2
+
+    return M
+
+
+def single_ended_to_mixed_mode(s_se: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    n = s_se.shape[0]
+    nf = s_se.shape[2]
+
+    if n % 2 != 0:
+        raise ValueError("Mixed-mode conversion requires even number of ports")
+
+    M = get_mixed_mode_conversion_matrix(n)
+    M_inv = np.conj(M.T)
+
+    s_mm = np.zeros_like(s_se)
+    for f in range(nf):
+        s_mm[:, :, f] = M @ s_se[:, :, f] @ M_inv
+
+    n_diff = n // 2
+    Sdd = s_mm[0:n_diff, 0:n_diff, :]
+    Sdc = s_mm[0:n_diff, n_diff:n, :]
+    Scd = s_mm[n_diff:n, 0:n_diff, :]
+    Scc = s_mm[n_diff:n, n_diff:n, :]
+
+    return Sdd, Sdc, Scd, Scc

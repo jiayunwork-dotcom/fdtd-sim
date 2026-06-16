@@ -3,7 +3,7 @@ import json
 import csv
 import io
 import datetime
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, Optional, List
 
 from .core import SimulationConfig, SimulationResult
 from .materials import MaterialLibrary, StructureManager
@@ -245,3 +245,86 @@ def get_sparam_filename(num_ports: int, format: str = 'snp') -> str:
         return f'fdtd_sparam.{num_ports}p'
     else:
         return 'fdtd_sparam.csv'
+
+
+def export_converted_parameters_csv(param_matrix: np.ndarray,
+                                    frequencies: np.ndarray,
+                                    param_type: str,
+                                    valid_only: bool = True,
+                                    valid_mask: Optional[np.ndarray] = None) -> str:
+    param_type = param_type.upper()
+    n = param_matrix.shape[0]
+    nf = param_matrix.shape[2]
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    header = ['Frequency (Hz)']
+    for i in range(n):
+        for j in range(n):
+            header.append(f'{param_type}{i+1}{j+1}_real')
+            header.append(f'{param_type}{i+1}{j+1}_imag')
+            header.append(f'{param_type}{i+1}{j+1}_mag')
+            header.append(f'{param_type}{i+1}{j+1}_phase_deg')
+    writer.writerow(header)
+
+    if valid_mask is None:
+        valid_mask = np.ones(nf, dtype=bool)
+    mask = valid_mask if valid_only else np.ones_like(frequencies, dtype=bool)
+
+    for f_idx in range(nf):
+        if not mask[f_idx]:
+            continue
+        freq = frequencies[f_idx]
+        row = [freq]
+        for i in range(n):
+            for j in range(n):
+                p_ij = param_matrix[i, j, f_idx]
+                mag = np.abs(p_ij)
+                phase_deg = np.angle(p_ij, deg=True)
+                row.append(p_ij.real)
+                row.append(p_ij.imag)
+                row.append(mag)
+                row.append(phase_deg)
+        writer.writerow(row)
+
+    return output.getvalue()
+
+
+def save_deembedding_preset(port_params: List[Dict], filepath: Optional[str] = None) -> str:
+    data = {
+        'version': '1.0',
+        'num_ports': len(port_params),
+        'ports': []
+    }
+    for p_idx, params in enumerate(port_params):
+        port_data = {
+            'port_index': p_idx,
+            'elec_length_deg': params.get('elec_length', 0.0),
+            'z0_line': params.get('z0_line', 50.0),
+            'f_ref_hz': params.get('f_ref', 1e9),
+            'enabled': params.get('enabled', True)
+        }
+        data['ports'].append(port_data)
+
+    json_str = json.dumps(data, indent=2)
+
+    if filepath is not None:
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(json_str)
+
+    return json_str
+
+
+def load_deembedding_preset(json_str: str) -> List[Dict]:
+    data = json.loads(json_str)
+    port_params = []
+    for port_data in data.get('ports', []):
+        params = {
+            'elec_length': port_data.get('elec_length_deg', 0.0),
+            'z0_line': port_data.get('z0_line', 50.0),
+            'f_ref': port_data.get('f_ref_hz', 1e9),
+            'enabled': port_data.get('enabled', True)
+        }
+        port_params.append(params)
+    return port_params

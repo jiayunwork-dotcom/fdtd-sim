@@ -33,13 +33,22 @@ from fdtd.visualization import (
     fig_to_image, fig_to_bytes, generate_animation_frames, save_gif,
     plot_parametric_sweep,
     plot_sparam_magnitude, plot_sparam_phase, plot_smith_chart,
-    plot_tdr, plot_port_time_signals
+    plot_tdr, plot_port_time_signals,
+    plot_sparam_magnitude_deembedded, plot_sparam_phase_deembedded,
+    plot_mixed_mode_s_parameters
 )
 from fdtd.io_utils import (
     export_config_json, import_config_json,
     export_all_fields_csv, export_far_field_csv,
     export_observation_csv, export_energy_csv,
-    export_sparam_touchstone, export_sparam_csv, get_sparam_filename
+    export_sparam_touchstone, export_sparam_csv, get_sparam_filename,
+    export_converted_parameters_csv,
+    save_deembedding_preset, load_deembedding_preset
+)
+from fdtd.sparam import (
+    deembed_s_parameters, auto_delay_calibration,
+    convert_network_parameters, single_ended_to_mixed_mode,
+    s_to_z, s_to_y, s_to_abcd
 )
 from fdtd.parametric_sweep import ParametricSweep, SweepConfig
 
@@ -110,6 +119,13 @@ def init_state():
         st.session_state.sparam_config = SParameterConfig()
         st.session_state.sparam_result = None
         st.session_state.sparam_analysis_tab = 0
+        st.session_state.deembed_params = []
+        st.session_state.deembed_result = None
+        st.session_state.conversion_target = 'Z'
+        st.session_state.converted_params = None
+        st.session_state.mixed_mode_result = None
+        st.session_state.freq_range_min = 0.0
+        st.session_state.freq_range_max = 0.0
 
 
 def unit_to_factor(unit):
@@ -1781,11 +1797,33 @@ else:
 
             st.divider()
 
-            sparam_tab1, sparam_tab2, sparam_tab3, sparam_tab4, sparam_tab5 = st.tabs(
-                ['📈 幅度', '📐 相位', '🔄 史密斯圆图', '⏱️ TDR', '📤 导出']
-            )
+            if num_ports % 2 == 0:
+                sparam_tab1, sparam_tab2, sparam_tab3, sparam_tab4, sparam_tab5, sparam_tab6, sparam_tab7 = st.tabs(
+                    ['📈 幅度', '📐 相位', '🔄 去嵌', '🔀 混合模式', '🔄 史密斯圆图', '⏱️ TDR', '📤 导出']
+                )
+                sparam_tabs = {
+                    'mag': sparam_tab1,
+                    'phase': sparam_tab2,
+                    'deembed': sparam_tab3,
+                    'mixed': sparam_tab4,
+                    'smith': sparam_tab5,
+                    'tdr': sparam_tab6,
+                    'export': sparam_tab7
+                }
+            else:
+                sparam_tab1, sparam_tab2, sparam_tab3, sparam_tab4, sparam_tab5, sparam_tab6 = st.tabs(
+                    ['📈 幅度', '📐 相位', '🔄 去嵌', '🔄 史密斯圆图', '⏱️ TDR', '📤 导出']
+                )
+                sparam_tabs = {
+                    'mag': sparam_tab1,
+                    'phase': sparam_tab2,
+                    'deembed': sparam_tab3,
+                    'smith': sparam_tab4,
+                    'tdr': sparam_tab5,
+                    'export': sparam_tab6
+                }
 
-            with sparam_tab1:
+            with sparam_tabs['mag']:
                 st.subheader('S参数幅度 (dB)')
                 col_mag1, col_mag2 = st.columns([3, 1])
                 with col_mag2:
@@ -1804,7 +1842,7 @@ else:
                     st.pyplot(fig_mag)
                     plt.close(fig_mag)
 
-            with sparam_tab2:
+            with sparam_tabs['phase']:
                 st.subheader('S参数相位 (度)')
                 col_phase1, col_phase2 = st.columns([3, 1])
                 with col_phase2:
@@ -1822,7 +1860,262 @@ else:
                     st.pyplot(fig_phase)
                     plt.close(fig_phase)
 
-            with sparam_tab3:
+            with sparam_tabs['deembed']:
+                st.subheader('端口去嵌与时延校准')
+
+                deembed_params = st.session_state.deembed_params
+                if len(deembed_params) != num_ports:
+                    deembed_params = []
+                    f_default = sparam_result.frequencies[len(sparam_result.frequencies) // 2]
+                    for p in range(num_ports):
+                        deembed_params.append({
+                            'elec_length': 0.0,
+                            'z0_line': sparam_result.ports[p].z0,
+                            'f_ref': f_default,
+                            'enabled': False
+                        })
+                    st.session_state.deembed_params = deembed_params
+
+                col_d1, col_d2 = st.columns([1, 2])
+
+                with col_d1:
+                    st.markdown('### 端口参数配置')
+
+                    for p in range(num_ports):
+                        with st.expander(f'端口 {p + 1}', expanded=True):
+                            enabled = st.checkbox(
+                                '启用去嵌',
+                                value=deembed_params[p].get('enabled', False),
+                                key=f'deembed_enable_{p}'
+                            )
+                            elec_length = st.number_input(
+                                '电长度 (度)',
+                                value=deembed_params[p].get('elec_length', 0.0),
+                                min_value=-1800.0, max_value=1800.0, step=1.0,
+                                key=f'deembed_elec_{p}'
+                            )
+                            z0_line = st.number_input(
+                                '特性阻抗 (Ω)',
+                                value=deembed_params[p].get('z0_line', 50.0),
+                                min_value=1.0, max_value=1000.0, step=1.0,
+                                key=f'deembed_z0_{p}'
+                            )
+                            f_ref = st.number_input(
+                                '参考频率 (THz)',
+                                value=deembed_params[p].get('f_ref', f_default) / 1e12,
+                                min_value=0.001, max_value=1000.0, step=0.1,
+                                key=f'deembed_fref_{p}'
+                            )
+                            deembed_params[p] = {
+                                'elec_length': elec_length,
+                                'z0_line': z0_line,
+                                'f_ref': f_ref * 1e12,
+                                'enabled': enabled
+                            }
+
+                    st.divider()
+                    st.markdown('### 预设管理')
+                    col_p1, col_p2 = st.columns(2)
+                    with col_p1:
+                        if st.button('💾 保存预设', use_container_width=True):
+                            preset_json = save_deembedding_preset(deembed_params)
+                            st.download_button(
+                                '📥 下载 JSON 预设',
+                                data=preset_json,
+                                file_name='deembed_preset.json',
+                                mime='application/json',
+                                use_container_width=True
+                            )
+                    with col_p2:
+                        uploaded_preset = st.file_uploader(
+                            '📂 加载预设',
+                            type=['json'],
+                            key='preset_upload',
+                            label_visibility='collapsed'
+                        )
+                        if uploaded_preset is not None:
+                            try:
+                                json_str = uploaded_preset.getvalue().decode('utf-8')
+                                loaded_params = load_deembedding_preset(json_str)
+                                if len(loaded_params) == num_ports:
+                                    st.session_state.deembed_params = loaded_params
+                                    st.success('预设加载成功!')
+                                    st.rerun()
+                                else:
+                                    st.error(f'预设端口数 ({len(loaded_params)}) 与当前端口数 ({num_ports}) 不匹配')
+                            except Exception as e:
+                                st.error(f'预设加载失败: {e}')
+
+                    st.divider()
+                    st.markdown('### 自动时延校准')
+                    calib_port = st.selectbox(
+                        '校准端口',
+                        list(range(1, num_ports + 1)),
+                        key='calib_port'
+                    )
+                    freq_min = st.number_input(
+                        '频率范围最小值 (THz)',
+                        value=float(sparam_result.frequencies[0] / 1e12),
+                        min_value=float(sparam_result.frequencies[0] / 1e12),
+                        max_value=float(sparam_result.frequencies[-1] / 1e12),
+                        step=0.1,
+                        key='calib_fmin'
+                    )
+                    freq_max = st.number_input(
+                        '频率范围最大值 (THz)',
+                        value=float(sparam_result.frequencies[-1] / 1e12),
+                        min_value=float(sparam_result.frequencies[0] / 1e12),
+                        max_value=float(sparam_result.frequencies[-1] / 1e12),
+                        step=0.1,
+                        key='calib_fmax'
+                    )
+
+                    if st.button('🔍 自动校准相位', type='primary', use_container_width=True):
+                        with st.spinner('正在执行相位优化...'):
+                            try:
+                                opt_len, f_ref_calib, info = auto_delay_calibration(
+                                    sparam_result.s_matrix,
+                                    sparam_result.frequencies,
+                                    calib_port - 1,
+                                    freq_range=(freq_min * 1e12, freq_max * 1e12)
+                                )
+                                st.session_state.deembed_params[calib_port - 1]['elec_length'] = opt_len
+                                st.session_state.deembed_params[calib_port - 1]['f_ref'] = f_ref_calib
+                                st.session_state.deembed_params[calib_port - 1]['enabled'] = True
+                                st.success(f'校准完成! 最佳电长度: {opt_len:.2f}° @ {f_ref_calib/1e12:.3f} THz')
+                                st.info(f'RMSE: {info["rmse_deg"]:.2f}°, 频点数: {info["num_frequency_points"]}')
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f'校准失败: {e}')
+
+                with col_d2:
+                    z0_avg = np.mean([p.z0 for p in sparam_result.ports])
+                    s_deembedded = deembed_s_parameters(
+                        sparam_result.s_matrix,
+                        deembed_params,
+                        sparam_result.frequencies,
+                        z0=z0_avg
+                    )
+                    st.session_state.deembed_result = s_deembedded
+
+                    freq_unit_deemb = st.selectbox(
+                        '频率单位',
+                        ['GHz', 'THz', 'MHz'],
+                        key='deembed_freq_unit'
+                    )
+                    plot_type = st.radio(
+                        '显示类型',
+                        ['幅度', '相位'],
+                        horizontal=True,
+                        key='deembed_plot_type'
+                    )
+
+                    if plot_type == '幅度':
+                        col_y1, col_y2 = st.columns(2)
+                        with col_y1:
+                            ymin_d = st.number_input('Y轴最小值 (dB)', value=-60.0, min_value=-100.0, max_value=0.0, step=5.0, key='deembed_ymin')
+                        with col_y2:
+                            ymax_d = st.number_input('Y轴最大值 (dB)', value=5.0, min_value=-20.0, max_value=20.0, step=5.0, key='deembed_ymax')
+                        show_inv_d = st.checkbox('显示超带宽数据', value=True, key='deembed_show_inv')
+
+                        fig_deemb = plot_sparam_magnitude_deembedded(
+                            sparam_result,
+                            s_deembedded,
+                            frequency_unit=freq_unit_deemb,
+                            y_min=ymin_d, y_max=ymax_d,
+                            show_invalid=show_inv_d
+                        )
+                    else:
+                        unwrap_d = st.checkbox('相位展开', value=True, key='deembed_unwrap')
+                        show_inv_d = st.checkbox('显示超带宽数据', value=True, key='deembed_show_inv_phase')
+
+                        fig_deemb = plot_sparam_phase_deembedded(
+                            sparam_result,
+                            s_deembedded,
+                            frequency_unit=freq_unit_deemb,
+                            unwrap=unwrap_d,
+                            show_invalid=show_inv_d
+                        )
+
+                    st.pyplot(fig_deemb)
+                    plt.close(fig_deemb)
+
+                    deembed_csv = export_sparam_csv(
+                        SParameterResult(
+                            frequencies=sparam_result.frequencies,
+                            s_matrix=s_deembedded,
+                            ports=sparam_result.ports,
+                            time_signals=sparam_result.time_signals,
+                            valid_bandwidth_mask=sparam_result.valid_bandwidth_mask,
+                            passivity_violation_mask=np.zeros_like(sparam_result.valid_bandwidth_mask),
+                            reciprocity_violation_mask=np.zeros_like(sparam_result.valid_bandwidth_mask)
+                        ),
+                        valid_only=True
+                    )
+                    st.download_button(
+                        '💾 下载去嵌后S参数 CSV',
+                        data=deembed_csv,
+                        file_name='fdtd_sparam_deembedded.csv',
+                        mime='text/csv',
+                        use_container_width=True
+                    )
+
+            if 'mixed' in sparam_tabs:
+                with sparam_tabs['mixed']:
+                    st.subheader('混合模式 S参数')
+                    st.info('端口配对规则: (1,2) → 差分对1, (3,4) → 差分对2')
+
+                    try:
+                        Sdd, Sdc, Scd, Scc = single_ended_to_mixed_mode(sparam_result.s_matrix)
+
+                        freq_unit_mm = st.selectbox(
+                            '频率单位',
+                            ['GHz', 'THz', 'MHz'],
+                            key='mixed_freq_unit'
+                        )
+                        plot_type_mm = st.radio(
+                            '显示类型',
+                            ['幅度', '相位'],
+                            horizontal=True,
+                            key='mixed_plot_type'
+                        )
+
+                        if plot_type_mm == '幅度':
+                            col_ym1, col_ym2 = st.columns(2)
+                            with col_ym1:
+                                ymin_mm = st.number_input('Y轴最小值 (dB)', value=-60.0, min_value=-100.0, max_value=0.0, step=5.0, key='mixed_ymin')
+                            with col_ym2:
+                                ymax_mm = st.number_input('Y轴最大值 (dB)', value=5.0, min_value=-20.0, max_value=20.0, step=5.0, key='mixed_ymax')
+
+                            fig_mm = plot_mixed_mode_s_parameters(
+                                Sdd, Sdc, Scd, Scc,
+                                sparam_result.frequencies,
+                                sparam_result.valid_bandwidth_mask,
+                                frequency_unit=freq_unit_mm,
+                                param_type='magnitude',
+                                y_min=ymin_mm, y_max=ymax_mm
+                            )
+                        else:
+                            unwrap_mm = st.checkbox('相位展开', value=True, key='mixed_unwrap')
+
+                            fig_mm = plot_mixed_mode_s_parameters(
+                                Sdd, Sdc, Scd, Scc,
+                                sparam_result.frequencies,
+                                sparam_result.valid_bandwidth_mask,
+                                frequency_unit=freq_unit_mm,
+                                param_type='phase',
+                                unwrap_phase=unwrap_mm
+                            )
+
+                        st.pyplot(fig_mm)
+                        plt.close(fig_mm)
+
+                        st.session_state.mixed_mode_result = (Sdd, Sdc, Scd, Scc)
+
+                    except Exception as e:
+                        st.error(f'混合模式转换失败: {e}')
+
+            with sparam_tabs['smith']:
                 st.subheader('史密斯圆图')
                 col_smith1, col_smith2 = st.columns([3, 1])
                 with col_smith2:
@@ -1844,7 +2137,7 @@ else:
                     st.pyplot(fig_smith)
                     plt.close(fig_smith)
 
-            with sparam_tab4:
+            with sparam_tabs['tdr']:
                 st.subheader('时域反射 (TDR)')
                 col_tdr1, col_tdr2 = st.columns([3, 1])
                 with col_tdr2:
@@ -1873,73 +2166,175 @@ else:
 
                 st.info('💡 TDR图显示沿传输线的阻抗分布。阻抗偏离Z0的位置表示存在反射。')
 
-            with sparam_tab5:
-                st.subheader('数据导出')
+            with sparam_tabs['export']:
+                st.subheader('数据导出与参数转换')
 
-                col_exp_a, col_exp_b = st.columns(2)
+                exp_tab1, exp_tab2 = st.tabs(['📄 标准导出', '🔄 参数转换'])
 
-                with col_exp_a:
-                    st.markdown('### Touchstone 格式 (.snp)')
-                    ts_format = st.selectbox(
-                        '参数格式',
-                        ['MA', 'DB', 'RI'],
-                        format_func=lambda x: {
-                            'MA': '幅度/相位 (Magnitude/Angle)',
-                            'DB': 'dB幅度/相位 (dB Magnitude/Angle)',
-                            'RI': '实部/虚部 (Real/Imaginary)'
-                        }[x],
-                        key='ts_format'
-                    )
-                    ts_freq_unit = st.selectbox(
-                        '频率单位',
-                        ['GHz', 'THz', 'MHz', 'kHz', 'Hz'],
-                        key='ts_freq_unit'
-                    )
-                    ts_valid_only = st.checkbox('仅导出有效带宽内数据', value=True, key='ts_valid')
+                with exp_tab1:
+                    col_exp_a, col_exp_b = st.columns(2)
 
-                    ts_data = export_sparam_touchstone(
-                        sparam_result,
-                        parameter_format=ts_format,
-                        frequency_unit=ts_freq_unit,
-                        valid_only=ts_valid_only
-                    )
-                    ts_filename = get_sparam_filename(num_ports, format='touchstone')
+                    with col_exp_a:
+                        st.markdown('### Touchstone 格式 (.snp)')
+                        ts_format = st.selectbox(
+                            '参数格式',
+                            ['MA', 'DB', 'RI'],
+                            format_func=lambda x: {
+                                'MA': '幅度/相位 (Magnitude/Angle)',
+                                'DB': 'dB幅度/相位 (dB Magnitude/Angle)',
+                                'RI': '实部/虚部 (Real/Imaginary)'
+                            }[x],
+                            key='ts_format'
+                        )
+                        ts_freq_unit = st.selectbox(
+                            '频率单位',
+                            ['GHz', 'THz', 'MHz', 'kHz', 'Hz'],
+                            key='ts_freq_unit'
+                        )
+                        ts_valid_only = st.checkbox('仅导出有效带宽内数据', value=True, key='ts_valid')
 
-                    st.download_button(
-                        '💾 下载 Touchstone 文件',
-                        data=ts_data,
-                        file_name=ts_filename,
-                        mime='text/plain',
-                        use_container_width=True
-                    )
+                        ts_data = export_sparam_touchstone(
+                            sparam_result,
+                            parameter_format=ts_format,
+                            frequency_unit=ts_freq_unit,
+                            valid_only=ts_valid_only
+                        )
+                        ts_filename = get_sparam_filename(num_ports, format='touchstone')
 
-                with col_exp_b:
-                    st.markdown('### CSV 格式')
-                    csv_valid_only = st.checkbox('仅导出有效带宽内数据', value=True, key='csv_valid')
+                        st.download_button(
+                            '💾 下载 Touchstone 文件',
+                            data=ts_data,
+                            file_name=ts_filename,
+                            mime='text/plain',
+                            use_container_width=True
+                        )
 
-                    csv_data = export_sparam_csv(
-                        sparam_result,
-                        valid_only=csv_valid_only
-                    )
+                    with col_exp_b:
+                        st.markdown('### CSV 格式')
+                        csv_valid_only = st.checkbox('仅导出有效带宽内数据', value=True, key='csv_valid')
 
-                    st.download_button(
-                        '💾 下载 CSV 文件',
-                        data=csv_data,
-                        file_name='fdtd_sparam.csv',
-                        mime='text/csv',
-                        use_container_width=True
-                    )
+                        csv_data = export_sparam_csv(
+                            sparam_result,
+                            valid_only=csv_valid_only
+                        )
 
-                st.divider()
-                st.subheader('端口信息')
-                port_info_cols = st.columns(num_ports)
-                for i, port in enumerate(sparam_result.ports):
-                    with port_info_cols[i]:
-                        st.markdown(f'**端口 {i + 1}**')
-                        st.write(f'位置: {port.position}')
-                        st.write(f'方向: {port.direction}')
-                        st.write(f'参考阻抗: {port.z0} Ω')
-                        st.write(f'宽度: {port.width} 网格')
+                        st.download_button(
+                            '💾 下载 CSV 文件',
+                            data=csv_data,
+                            file_name='fdtd_sparam.csv',
+                            mime='text/csv',
+                            use_container_width=True
+                        )
+
+                    st.divider()
+                    st.subheader('端口信息')
+                    port_info_cols = st.columns(num_ports)
+                    for i, port in enumerate(sparam_result.ports):
+                        with port_info_cols[i]:
+                            st.markdown(f'**端口 {i + 1}**')
+                            st.write(f'位置: {port.position}')
+                            st.write(f'方向: {port.direction}')
+                            st.write(f'参考阻抗: {port.z0} Ω')
+                            st.write(f'宽度: {port.width} 网格')
+
+                with exp_tab2:
+                    st.subheader('网络参数矩阵转换')
+                    st.caption('在 S/Z/Y/ABCD 四种网络参数之间相互转换')
+
+                    col_c1, col_c2 = st.columns([1, 2])
+
+                    with col_c1:
+                        z0_conv = st.number_input(
+                            '参考阻抗 Z0 (Ω)',
+                            value=float(np.mean([p.z0 for p in sparam_result.ports])),
+                            min_value=1.0, max_value=1000.0, step=1.0,
+                            key='conv_z0'
+                        )
+                        target_type = st.selectbox(
+                            '目标参数类型',
+                            ['Z', 'Y', 'ABCD'],
+                            format_func=lambda x: {
+                                'Z': 'Z 阻抗参数',
+                                'Y': 'Y 导纳参数',
+                                'ABCD': 'ABCD 传输矩阵'
+                            }[x],
+                            key='conv_target'
+                        )
+
+                        if st.button('🔄 执行转换', type='primary', use_container_width=True):
+                            try:
+                                converted = convert_network_parameters(
+                                    sparam_result.s_matrix,
+                                    'S', target_type, z0=z0_conv
+                                )
+                                st.session_state.converted_params = (converted, target_type)
+                                st.success(f'成功转换为 {target_type} 参数!')
+                            except Exception as e:
+                                st.error(f'转换失败: {e}')
+
+                        if st.session_state.converted_params is not None:
+                            conv_matrix, conv_type = st.session_state.converted_params
+                            csv_conv = export_converted_parameters_csv(
+                                conv_matrix,
+                                sparam_result.frequencies,
+                                conv_type,
+                                valid_only=True,
+                                valid_mask=sparam_result.valid_bandwidth_mask
+                            )
+                            st.download_button(
+                                f'💾 下载 {conv_type} 参数 CSV',
+                                data=csv_conv,
+                                file_name=f'fdtd_{conv_type}_parameters.csv',
+                                mime='text/csv',
+                                use_container_width=True
+                            )
+
+                    with col_c2:
+                        if st.session_state.converted_params is not None:
+                            conv_matrix, conv_type = st.session_state.converted_params
+                            n_conv = conv_matrix.shape[0]
+
+                            st.markdown(f'### {conv_type} 参数矩阵 (实部)')
+                            valid_mask = sparam_result.valid_bandwidth_mask
+                            freq_show = sparam_result.frequencies[valid_mask]
+                            display_start = st.number_input(
+                                '显示起始频点索引',
+                                value=0, min_value=0, max_value=len(freq_show) - 1, step=1
+                            )
+                            display_count = st.number_input(
+                                '显示频点数',
+                                value=min(10, len(freq_show) - display_start),
+                                min_value=1, max_value=50, step=1
+                            )
+
+                            data_real = []
+                            data_imag = []
+                            for f_idx in range(display_start, min(display_start + display_count, len(freq_show))):
+                                f_actual = np.where(sparam_result.frequencies == freq_show[f_idx])[0][0]
+                                row_real = [f'{freq_show[f_idx] / 1e9:.4f} GHz']
+                                row_imag = [f'{freq_show[f_idx] / 1e9:.4f} GHz']
+                                for i in range(n_conv):
+                                    for j in range(n_conv):
+                                        val = conv_matrix[i, j, f_actual]
+                                        row_real.append(f'{val.real:.6e}')
+                                        row_imag.append(f'{val.imag:.6e}')
+                                data_real.append(row_real)
+                                data_imag.append(row_imag)
+
+                            headers = ['频率']
+                            for i in range(n_conv):
+                                for j in range(n_conv):
+                                    headers.append(f'{conv_type}{i+1}{j+1}')
+
+                            st.markdown('#### 实部')
+                            df_real = {headers[k]: [row[k] for row in data_real] for k in range(len(headers))}
+                            st.dataframe(df_real, use_container_width=True)
+
+                            st.markdown('#### 虚部')
+                            df_imag = {headers[k]: [row[k] for row in data_imag] for k in range(len(headers))}
+                            st.dataframe(df_imag, use_container_width=True)
+                        else:
+                            st.info('请选择目标参数类型并点击"执行转换"按钮')
 
     st.divider()
 
