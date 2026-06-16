@@ -90,6 +90,17 @@ def init_state():
         st.session_state.selected_obs_point = 0
         st.session_state.analysis_tab = 0
 
+        st.session_state.compare_mode = False
+        st.session_state.compare_material_lib = MaterialLibrary()
+        st.session_state.compare_structure_mgr = StructureManager()
+        st.session_state.compare_source_mgr = SourceManager()
+        st.session_state.compare_boundary = BoundaryCondition()
+        st.session_state.compare_result = None
+        st.session_state.compare_color_grid = None
+
+        st.session_state.bookmarks = []
+        st.session_state.convergence_result = None
+
 
 def unit_to_factor(unit):
     return 1e-6 if unit == 'um' else 1e-3
@@ -103,6 +114,12 @@ init_state()
 
 with st.sidebar:
     st.title('⚙️ 仿真配置')
+
+    compare_mode = st.toggle('🔄 对比模式', value=st.session_state.compare_mode, key='compare_mode_toggle')
+    st.session_state.compare_mode = compare_mode
+
+    if compare_mode:
+        st.info('💡 对比模式已开启，左右面板共享域尺寸和时间步')
 
     with st.expander('📐 仿真域与网格', expanded=True):
         unit = st.selectbox('长度单位', ['um', 'mm'], index=0, key='unit_select')
@@ -362,6 +379,173 @@ with st.sidebar:
         boundary.pml_layers = st.number_input('PML层数', value=boundary.pml_layers,
                                               min_value=2, max_value=20, key='pml_layers')
 
+    if compare_mode:
+        with st.expander('🔄 对比仿真配置', expanded=True):
+            st.caption('配置右侧对比面板的参数')
+
+            st.subheader('边界条件')
+            compare_bc = st.session_state.compare_boundary
+            bc_types = ['pec', 'mur', 'pml']
+            bc_labels = {'pec': 'PEC反射壁', 'mur': 'Mur吸收', 'pml': 'PML完美匹配层'}
+
+            col1, col2 = st.columns(2)
+            with col1:
+                compare_bc.x_min_type = st.selectbox('左边界(对比)', bc_types,
+                                                     index=bc_types.index(compare_bc.x_min_type),
+                                                     format_func=lambda x: bc_labels[x],
+                                                     key='compare_bc_xmin')
+                compare_bc.x_max_type = st.selectbox('右边界(对比)', bc_types,
+                                                     index=bc_types.index(compare_bc.x_max_type),
+                                                     format_func=lambda x: bc_labels[x],
+                                                     key='compare_bc_xmax')
+            with col2:
+                compare_bc.y_min_type = st.selectbox('下边界(对比)', bc_types,
+                                                     index=bc_types.index(compare_bc.y_min_type),
+                                                     format_func=lambda x: bc_labels[x],
+                                                     key='compare_bc_ymin')
+                compare_bc.y_max_type = st.selectbox('上边界(对比)', bc_types,
+                                                     index=bc_types.index(compare_bc.y_max_type),
+                                                     format_func=lambda x: bc_labels[x],
+                                                     key='compare_bc_ymax')
+
+            compare_bc.pml_layers = st.number_input('PML层数(对比)', value=compare_bc.pml_layers,
+                                                    min_value=2, max_value=20, key='compare_pml_layers')
+
+            st.divider()
+            st.subheader('结构与材料')
+
+            copy_structures = st.button('📋 复制基准结构到对比', key='copy_struct_to_compare')
+            if copy_structures:
+                st.session_state.compare_structure_mgr = copy.deepcopy(st.session_state.structure_mgr)
+                st.session_state.compare_material_lib = copy.deepcopy(st.session_state.material_lib)
+                st.success('已复制基准结构和材料')
+
+            compare_struct_mgr = st.session_state.compare_structure_mgr
+            compare_mat_lib = st.session_state.compare_material_lib
+            compare_mat_names = compare_mat_lib.list_materials()
+
+            compare_shape_type = st.selectbox('形状类型(对比)', ['rectangle', 'circle', 'line'],
+                                              format_func=lambda x: {'rectangle': '矩形', 'circle': '圆形', 'line': '线'}[x],
+                                              key='compare_shape_type')
+
+            compare_struct_mat = st.selectbox('材料(对比)', compare_mat_names, key='compare_struct_mat')
+            compare_is_pec = st.checkbox('PEC (理想电导体)', value=False, key='compare_struct_is_pec')
+
+            compare_params = {}
+            if compare_shape_type == 'rectangle':
+                col1, col2 = st.columns(2)
+                with col1:
+                    compare_params['x0'] = st.number_input('X0', value=20.0, key='compare_rect_x0') / factor
+                    compare_params['y0'] = st.number_input('Y0', value=20.0, key='compare_rect_y0') / factor
+                with col2:
+                    compare_params['width'] = st.number_input('宽度', value=20.0, key='compare_rect_w') / factor
+                    compare_params['height'] = st.number_input('高度', value=20.0, key='compare_rect_h') / factor
+            elif compare_shape_type == 'circle':
+                col1, col2 = st.columns(2)
+                with col1:
+                    compare_params['cx'] = st.number_input('中心X', value=50.0, key='compare_circ_cx') / factor
+                    compare_params['cy'] = st.number_input('中心Y', value=50.0, key='compare_circ_cy') / factor
+                with col2:
+                    compare_params['radius'] = st.number_input('半径', value=15.0, key='compare_circ_r') / factor
+            elif compare_shape_type == 'line':
+                col1, col2 = st.columns(2)
+                with col1:
+                    compare_params['x0'] = st.number_input('X0', value=10.0, key='compare_line_x0') / factor
+                    compare_params['y0'] = st.number_input('Y0', value=10.0, key='compare_line_y0') / factor
+                with col2:
+                    compare_params['x1'] = st.number_input('X1', value=90.0, key='compare_line_x1') / factor
+                    compare_params['y1'] = st.number_input('Y1', value=90.0, key='compare_line_y1') / factor
+                compare_params['thickness'] = st.number_input('厚度', value=1.0, key='compare_line_thick') / factor
+
+            if st.button('➕ 添加对比结构', key='add_compare_struct_btn', use_container_width=True):
+                compare_struct = Structure(compare_shape_type, compare_struct_mat, compare_params, is_pec=compare_is_pec)
+                compare_struct_mgr.add_structure(compare_struct)
+                st.success(f'已添加对比 {compare_shape_type} 结构')
+                st.rerun()
+
+            st.subheader('对比结构列表')
+            if compare_struct_mgr.structures:
+                for idx, s in enumerate(compare_struct_mgr.structures):
+                    col1, col2 = st.columns([4, 1])
+                    with col1:
+                        st.write(f'{idx+1}. {s.shape_type} - {s.material_name}')
+                    with col2:
+                        if st.button('删除', key=f'del_compare_struct_{idx}'):
+                            compare_struct_mgr.remove_structure(idx)
+                            st.rerun()
+            else:
+                st.info('暂无对比结构')
+
+            if st.button('🗑️ 清空对比结构', key='clear_compare_structs'):
+                compare_struct_mgr.clear()
+                st.rerun()
+
+            st.divider()
+            st.subheader('激励源')
+
+            copy_sources = st.button('📋 复制基准源到对比', key='copy_src_to_compare')
+            if copy_sources:
+                st.session_state.compare_source_mgr = copy.deepcopy(st.session_state.source_mgr)
+                st.success('已复制基准源配置')
+
+            compare_source_mgr = st.session_state.compare_source_mgr
+            compare_source_types = ['point', 'line']
+            compare_source_type = st.selectbox('源类型(对比)', compare_source_types,
+                                               format_func=lambda x: {'point': '点源', 'line': '线源'}[x],
+                                               key='compare_source_type')
+
+            compare_waveform_type = st.selectbox('波形(对比)', ['gaussian', 'sine'],
+                                                 format_func=lambda x: {'gaussian': '高斯脉冲', 'sine': '正弦波'}[x],
+                                                 key='compare_waveform_type')
+
+            col1, col2 = st.columns(2)
+            with col1:
+                compare_src_freq = st.number_input('频率 (THz)', value=10.0, min_value=0.1, max_value=1000.0, key='compare_src_freq')
+                compare_src_amp = st.number_input('幅值', value=10.0, min_value=0.01, max_value=1000.0, key='compare_src_amp')
+            with col2:
+                if compare_waveform_type == 'gaussian':
+                    compare_src_bw = st.number_input('带宽 (THz)', value=5.0, min_value=0.1, max_value=500.0, key='compare_src_bw')
+
+            col1, col2 = st.columns(2)
+            with col1:
+                compare_src_x = st.number_input('位置 X', value=int(nx / 2), min_value=0, max_value=nx - 1, key='compare_src_x')
+            with col2:
+                compare_src_y = st.number_input('位置 Y', value=int(ny / 2), min_value=0, max_value=ny - 1, key='compare_src_y')
+
+            compare_src_direction = 'x'
+            if compare_source_type == 'line':
+                compare_src_direction = st.selectbox('方向', ['x', 'y'], key='compare_src_dir')
+
+            if st.button('➕ 添加对比源', key='add_compare_src_btn', use_container_width=True):
+                compare_wf = Waveform(
+                    waveform_type=compare_waveform_type,
+                    frequency=compare_src_freq * 1e12,
+                    amplitude=compare_src_amp,
+                    bandwidth=compare_src_bw * 1e12 if compare_waveform_type == 'gaussian' else 0.0
+                )
+                compare_src = Source(
+                    source_type=compare_source_type,
+                    position=(int(compare_src_x), int(compare_src_y)),
+                    waveform=compare_wf,
+                    direction=compare_src_direction
+                )
+                compare_source_mgr.add_source(compare_src)
+                st.success('已添加对比源')
+                st.rerun()
+
+            st.subheader('对比源列表')
+            if compare_source_mgr.sources:
+                for idx, s in enumerate(compare_source_mgr.sources):
+                    col1, col2 = st.columns([4, 1])
+                    with col1:
+                        st.write(f'{idx+1}. {s.source_type} - {s.waveform.waveform_type}')
+                    with col2:
+                        if st.button('删除', key=f'del_compare_src_{idx}'):
+                            compare_source_mgr.remove_source(idx)
+                            st.rerun()
+            else:
+                st.info('暂无对比源')
+
     with st.expander('📍 观测点 & 近场采集', expanded=False):
         obs_points = st.session_state.observation_points
 
@@ -495,7 +679,8 @@ with st.sidebar:
     with col1:
         run_disabled = (st.session_state.config.dt is not None and
                         not st.session_state.config.is_stable())
-        if st.button('▶️ 运行仿真', key='run_btn', use_container_width=True,
+        run_label = '▶️ 运行对比仿真' if compare_mode else '▶️ 运行仿真'
+        if st.button(run_label, key='run_btn', use_container_width=True,
                      type='primary', disabled=run_disabled):
             with st.spinner('正在运行仿真...'):
                 progress_bar = st.progress(0)
@@ -504,6 +689,8 @@ with st.sidebar:
                     progress_bar.progress(current / total)
 
                 config_copy = copy.deepcopy(st.session_state.config)
+                config_copy.observation_points = st.session_state.observation_points
+                config_copy.near_field_box = st.session_state.near_field_box
                 mat_lib_copy = copy.deepcopy(st.session_state.material_lib)
                 struct_copy = copy.deepcopy(st.session_state.structure_mgr)
                 src_copy = copy.deepcopy(st.session_state.source_mgr)
@@ -532,15 +719,37 @@ with st.sidebar:
                 else:
                     st.session_state.far_field_result = None
 
+                if compare_mode:
+                    progress_bar.progress(0.5)
+                    compare_config_copy = copy.deepcopy(st.session_state.config)
+                    compare_config_copy.observation_points = st.session_state.observation_points
+                    compare_config_copy.near_field_box = st.session_state.near_field_box
+                    compare_mat_lib_copy = copy.deepcopy(st.session_state.compare_material_lib)
+                    compare_struct_copy = copy.deepcopy(st.session_state.compare_structure_mgr)
+                    compare_src_copy = copy.deepcopy(st.session_state.compare_source_mgr)
+                    compare_bc_copy = copy.deepcopy(st.session_state.compare_boundary)
+
+                    compare_fdtd = FDTD2D(compare_config_copy, compare_mat_lib_copy,
+                                          compare_struct_copy, compare_src_copy, compare_bc_copy)
+                    compare_result = compare_fdtd.run(progress_callback=progress_cb)
+                    st.session_state.compare_result = compare_result
+                    st.session_state.compare_color_grid = compare_fdtd.get_color_grid_physical()
+
                 progress_bar.empty()
-                st.success(f'仿真完成! 耗时: {result.computation_time:.2f}s')
+                if compare_mode:
+                    st.success(f'对比仿真完成! 基准: {result.computation_time:.2f}s, 对比: {compare_result.computation_time:.2f}s')
+                else:
+                    st.success(f'仿真完成! 耗时: {result.computation_time:.2f}s')
                 st.rerun()
 
     with col2:
         if st.button('🔄 重置', key='reset_btn', use_container_width=True):
             st.session_state.result = None
             st.session_state.far_field_result = None
+            st.session_state.compare_result = None
             st.session_state.current_frame = 0
+            st.session_state.bookmarks = []
+            st.session_state.convergence_result = None
             st.rerun()
 
 st.title('📡 FDTD 电磁场仿真与分析工具')
@@ -612,40 +821,53 @@ if result is None:
         """)
 
 else:
-    tab1, tab2, tab3, tab4 = st.tabs(['🖼️ 场分布', '📈 时域/频域', '📡 远场', '⚡ 参数扫描'])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(['🖼️ 场分布', '📈 时域/频域', '📡 远场', '⚡ 参数扫描', '📐 收敛性分析'])
 
     with tab1:
-        col_left, col_right = st.columns([3, 1])
-
-        with col_left:
-            st.subheader('Ez 场分布')
-
-            total_frames = len(result.ez_frames)
+        if compare_mode and st.session_state.compare_result is not None:
+            compare_result = st.session_state.compare_result
+            compare_color_grid = getattr(st.session_state, 'compare_color_grid', None)
+            total_frames = min(len(result.ez_frames), len(compare_result.ez_frames))
             st.session_state.current_frame = min(
                 st.session_state.get('current_frame', 0),
                 total_frames - 1
             )
-
             current_frame = st.session_state.current_frame
-            ez_frame = result.ez_frames[current_frame]
-            vmax = np.max(np.abs(result.ez_frames)) if np.max(np.abs(result.ez_frames)) > 0 else 1.0
 
-            color_grid = getattr(st.session_state, 'color_grid', None)
+            vmax_base = np.max(np.abs(result.ez_frames)) if np.max(np.abs(result.ez_frames)) > 0 else 1.0
+            vmax_comp = np.max(np.abs(compare_result.ez_frames)) if np.max(np.abs(compare_result.ez_frames)) > 0 else 1.0
+            vmax = max(vmax_base, vmax_comp)
 
-            plot_placeholder = st.empty()
-            fig = plot_field_heatmap(
-                ez_frame,
-                title=f'Ez Field - 时间步 {current_frame * config.sample_interval}',
-                dx=config.dx, dy=config.dy, unit=config.unit,
-                color_grid=color_grid,
-                vmin=-vmax, vmax=vmax
-            )
-            plot_placeholder.pyplot(fig)
-            plt.close(fig)
+            col_base, col_comp = st.columns(2)
+
+            with col_base:
+                st.subheader('🔵 基准仿真')
+                color_grid = getattr(st.session_state, 'color_grid', None)
+                fig_base = plot_field_heatmap(
+                    result.ez_frames[current_frame],
+                    title=f'基准 - 时间步 {current_frame * config.sample_interval}',
+                    dx=config.dx, dy=config.dy, unit=config.unit,
+                    color_grid=color_grid,
+                    vmin=-vmax, vmax=vmax
+                )
+                st.pyplot(fig_base)
+                plt.close(fig_base)
+
+            with col_comp:
+                st.subheader('🔴 对比仿真')
+                fig_comp = plot_field_heatmap(
+                    compare_result.ez_frames[current_frame],
+                    title=f'对比 - 时间步 {current_frame * config.sample_interval}',
+                    dx=config.dx, dy=config.dy, unit=config.unit,
+                    color_grid=compare_color_grid,
+                    vmin=-vmax, vmax=vmax
+                )
+                st.pyplot(fig_comp)
+                plt.close(fig_comp)
 
             st.divider()
 
-            col_play1, col_play2, col_play3, col_play4 = st.columns([1, 1, 3, 1])
+            col_play1, col_play2, col_play3, col_play4, col_play5 = st.columns([1, 1, 3, 1, 1.5])
             with col_play1:
                 if st.button('⏮️', key='prev_frame'):
                     st.session_state.current_frame = max(0, st.session_state.current_frame - 1)
@@ -656,11 +878,33 @@ else:
                     st.session_state.is_playing = not st.session_state.is_playing
                     st.rerun()
             with col_play3:
-                frame_idx = st.slider('帧', min_value=0, max_value=total_frames - 1,
+                frame_idx = st.slider('帧 (联动)', min_value=0, max_value=total_frames - 1,
                                       key='current_frame')
             with col_play4:
                 if st.button('⏭️', key='next_frame'):
                     st.session_state.current_frame = min(total_frames - 1, st.session_state.current_frame + 1)
+                    st.rerun()
+            with col_play5:
+                if st.button('📸 保存快照', key='save_bookmark_btn', use_container_width=True):
+                    if len(st.session_state.bookmarks) >= 10:
+                        st.session_state.bookmarks.pop(0)
+                    thumb_fig = plot_field_heatmap(
+                        result.ez_frames[current_frame],
+                        title=f'帧 {current_frame}',
+                        dx=config.dx, dy=config.dy, unit=config.unit,
+                        color_grid=color_grid,
+                        vmin=-vmax, vmax=vmax
+                    )
+                    thumb_buf = io.BytesIO()
+                    thumb_fig.savefig(thumb_buf, format='png', dpi=50, bbox_inches='tight')
+                    thumb_buf.seek(0)
+                    st.session_state.bookmarks.append({
+                        'frame': current_frame,
+                        'thumbnail': thumb_buf.getvalue(),
+                        'note': f'帧 {current_frame}'
+                    })
+                    plt.close(thumb_fig)
+                    st.success('已保存快照')
                     st.rerun()
 
             if st.session_state.is_playing:
@@ -670,21 +914,207 @@ else:
                 tm.sleep(0.08)
                 st.rerun()
 
-        with col_right:
-            st.subheader('能量分布')
-            fig_energy = plot_energy_density(
-                result.energy_density,
-                dx=config.dx, dy=config.dy, unit=config.unit,
-                title='时间平均能量密度'
-            )
-            st.pyplot(fig_energy)
-            plt.close(fig_energy)
+            st.divider()
+            st.subheader('🔖 书签列表')
+            if st.session_state.bookmarks:
+                bookmark_cols = st.columns(5)
+                for i, bm in enumerate(st.session_state.bookmarks):
+                    with bookmark_cols[i % 5]:
+                        st.image(bm['thumbnail'], caption=f'帧 {bm["frame"]}', use_column_width=True)
+                        new_note = st.text_input('备注', value=bm['note'], key=f'note_{i}',
+                                                 label_visibility='collapsed')
+                        bm['note'] = new_note
+                        col_btn1, col_btn2 = st.columns(2)
+                        with col_btn1:
+                            if st.button('跳转', key=f'jump_{i}', use_container_width=True):
+                                st.session_state.current_frame = bm['frame']
+                                st.rerun()
+                        with col_btn2:
+                            if st.button('删除', key=f'del_bm_{i}', use_container_width=True):
+                                st.session_state.bookmarks.pop(i)
+                                st.rerun()
+            else:
+                st.info('暂无书签，点击"保存快照"添加')
 
             st.divider()
-            st.subheader('仿真统计')
-            st.metric('计算耗时', f'{result.computation_time:.2f} s')
-            st.metric('采样帧数', len(result.ez_frames))
-            st.metric('峰值场强', f'{np.max(np.abs(result.ez_final)):.4f} V/m')
+            st.subheader('📊 时域波形 & 频谱对比')
+            obs_points = st.session_state.observation_points
+            if obs_points and result.observation_data and compare_result.observation_data:
+                selected_idx = st.selectbox('选择观测点',
+                                            [f'点 {i+1}: ({pt[0]}, {pt[1]})' for i, pt in enumerate(obs_points)],
+                                            key='compare_obs_select')
+                idx = [f'点 {i+1}: ({pt[0]}, {pt[1]})' for i, pt in enumerate(obs_points)].index(selected_idx)
+                pt = obs_points[idx]
+                pt_key = tuple(pt)
+
+                col1, col2 = st.columns(2)
+                with col1:
+                    fig, ax = plt.subplots(figsize=(8, 4))
+                    if pt_key in result.observation_data:
+                        ax.plot(result.observation_times * 1e9, result.observation_data[pt_key],
+                                'b-', linewidth=1, label='基准')
+                    if pt_key in compare_result.observation_data:
+                        ax.plot(compare_result.observation_times * 1e9, compare_result.observation_data[pt_key],
+                                'r--', linewidth=1, label='对比')
+                    ax.set_xlabel('Time (ns)')
+                    ax.set_ylabel('Ez (V/m)')
+                    ax.set_title(f'时域波形对比 - 观测点 {pt}')
+                    ax.legend()
+                    ax.grid(True, alpha=0.3)
+                    plt.tight_layout()
+                    st.pyplot(fig)
+                    plt.close(fig)
+
+                with col2:
+                    fig, ax = plt.subplots(figsize=(8, 4))
+                    if pt_key in result.observation_data:
+                        data_base = result.observation_data[pt_key]
+                        n_base = len(data_base)
+                        dt_base = result.observation_times[1] - result.observation_times[0]
+                        freq_base = np.fft.fftfreq(n_base, dt_base)
+                        spec_base = np.abs(np.fft.fft(data_base))
+                        spec_db_base = 20 * np.log10(spec_base + 1e-30)
+                        pos_mask_base = freq_base >= 0
+                        ax.plot(freq_base[pos_mask_base] / 1e9, spec_db_base[pos_mask_base],
+                                'b-', linewidth=1, label='基准')
+
+                    if pt_key in compare_result.observation_data:
+                        data_comp = compare_result.observation_data[pt_key]
+                        n_comp = len(data_comp)
+                        dt_comp = compare_result.observation_times[1] - compare_result.observation_times[0]
+                        freq_comp = np.fft.fftfreq(n_comp, dt_comp)
+                        spec_comp = np.abs(np.fft.fft(data_comp))
+                        spec_db_comp = 20 * np.log10(spec_comp + 1e-30)
+                        pos_mask_comp = freq_comp >= 0
+                        ax.plot(freq_comp[pos_mask_comp] / 1e9, spec_db_comp[pos_mask_comp],
+                                'r--', linewidth=1, label='对比')
+
+                    ax.set_xlabel('Frequency (GHz)')
+                    ax.set_ylabel('Magnitude (dB)')
+                    ax.set_title(f'频谱对比 - 观测点 {pt}')
+                    ax.legend()
+                    ax.grid(True, alpha=0.3)
+                    plt.tight_layout()
+                    st.pyplot(fig)
+                    plt.close(fig)
+            else:
+                st.info('请先添加观测点')
+
+        else:
+            col_left, col_right = st.columns([3, 1])
+
+            with col_left:
+                st.subheader('Ez 场分布')
+
+                total_frames = len(result.ez_frames)
+                st.session_state.current_frame = min(
+                    st.session_state.get('current_frame', 0),
+                    total_frames - 1
+                )
+
+                current_frame = st.session_state.current_frame
+                ez_frame = result.ez_frames[current_frame]
+                vmax = np.max(np.abs(result.ez_frames)) if np.max(np.abs(result.ez_frames)) > 0 else 1.0
+
+                color_grid = getattr(st.session_state, 'color_grid', None)
+
+                plot_placeholder = st.empty()
+                fig = plot_field_heatmap(
+                    ez_frame,
+                    title=f'Ez Field - 时间步 {current_frame * config.sample_interval}',
+                    dx=config.dx, dy=config.dy, unit=config.unit,
+                    color_grid=color_grid,
+                    vmin=-vmax, vmax=vmax
+                )
+                plot_placeholder.pyplot(fig)
+                plt.close(fig)
+
+                st.divider()
+
+                col_play1, col_play2, col_play3, col_play4, col_play5 = st.columns([1, 1, 3, 1, 1.5])
+                with col_play1:
+                    if st.button('⏮️', key='prev_frame'):
+                        st.session_state.current_frame = max(0, st.session_state.current_frame - 1)
+                        st.rerun()
+                with col_play2:
+                    if st.button('▶️' if not st.session_state.is_playing else '⏸️',
+                                 key='play_pause'):
+                        st.session_state.is_playing = not st.session_state.is_playing
+                        st.rerun()
+                with col_play3:
+                    frame_idx = st.slider('帧', min_value=0, max_value=total_frames - 1,
+                                          key='current_frame')
+                with col_play4:
+                    if st.button('⏭️', key='next_frame'):
+                        st.session_state.current_frame = min(total_frames - 1, st.session_state.current_frame + 1)
+                        st.rerun()
+                with col_play5:
+                    if st.button('📸 保存快照', key='save_bookmark_btn', use_container_width=True):
+                        if len(st.session_state.bookmarks) >= 10:
+                            st.session_state.bookmarks.pop(0)
+                        thumb_fig = plot_field_heatmap(
+                            ez_frame,
+                            title=f'帧 {current_frame}',
+                            dx=config.dx, dy=config.dy, unit=config.unit,
+                            color_grid=color_grid,
+                            vmin=-vmax, vmax=vmax
+                        )
+                        thumb_buf = io.BytesIO()
+                        thumb_fig.savefig(thumb_buf, format='png', dpi=50, bbox_inches='tight')
+                        thumb_buf.seek(0)
+                        st.session_state.bookmarks.append({
+                            'frame': current_frame,
+                            'thumbnail': thumb_buf.getvalue(),
+                            'note': f'帧 {current_frame}'
+                        })
+                        plt.close(thumb_fig)
+                        st.success('已保存快照')
+                        st.rerun()
+
+                if st.session_state.is_playing:
+                    import time as tm
+                    next_frame = (st.session_state.current_frame + 1) % total_frames
+                    st.session_state.current_frame = next_frame
+                    tm.sleep(0.08)
+                    st.rerun()
+
+                st.divider()
+                st.subheader('🔖 书签列表')
+                if st.session_state.bookmarks:
+                    bookmark_cols = st.columns(5)
+                    for i, bm in enumerate(st.session_state.bookmarks):
+                        with bookmark_cols[i % 5]:
+                            st.image(bm['thumbnail'], caption=f'帧 {bm["frame"]}', use_column_width=True)
+                            new_note = st.text_input('备注', value=bm['note'], key=f'note_{i}',
+                                                     label_visibility='collapsed')
+                            bm['note'] = new_note
+                            col_btn1, col_btn2 = st.columns(2)
+                            with col_btn1:
+                                if st.button('跳转', key=f'jump_{i}', use_container_width=True):
+                                    st.session_state.current_frame = bm['frame']
+                                    st.rerun()
+                            with col_btn2:
+                                if st.button('删除', key=f'del_bm_{i}', use_container_width=True):
+                                    st.session_state.bookmarks.pop(i)
+                                    st.rerun()
+                else:
+                    st.info('暂无书签，点击"保存快照"添加')
+
+            with col_right:
+                st.subheader('能量分布')
+                fig_energy = plot_energy_density(
+                    result.energy_density,
+                    dx=config.dx, dy=config.dy, unit=config.unit,
+                    title='时间平均能量密度'
+                )
+                st.pyplot(fig_energy)
+                plt.close(fig_energy)
+
+                st.divider()
+                st.subheader('仿真统计')
+                st.metric('计算耗时', f'{result.computation_time:.2f} s')
+                st.metric('采样帧数', len(result.ez_frames))
+                st.metric('峰值场强', f'{np.max(np.abs(result.ez_final)):.4f} V/m')
 
     with tab2:
         obs_points = st.session_state.observation_points
@@ -881,6 +1311,175 @@ else:
             )
             st.pyplot(fig_sweep)
             plt.close(fig_sweep)
+
+    with tab5:
+        st.subheader('网格收敛性分析')
+        st.caption('通过不同网格密度的仿真结果对比，判断当前网格是否足够精细')
+
+        col1, col2 = st.columns(2)
+        with col1:
+            ref_dx = st.number_input('参考网格步长 dx (um)', value=1.0, min_value=0.01,
+                                     max_value=100.0, step=0.1, key='conv_ref_dx')
+            ref_dx_m = ref_dx * 1e-6
+
+            obs_conv_x = st.number_input('观测点 X (格点)', value=int(config.nx / 2),
+                                         min_value=0, max_value=config.nx - 1, key='conv_obs_x')
+            obs_conv_y = st.number_input('观测点 Y (格点)', value=int(config.ny / 2),
+                                         min_value=0, max_value=config.ny - 1, key='conv_obs_y')
+
+        with col2:
+            levels = st.multiselect('网格密度级别 (相对于参考密度的倍数)',
+                                    ['1x', '2x', '4x', '8x'],
+                                    default=['1x', '2x', '4x'],
+                                    key='conv_levels')
+
+            st.info('💡 倍数越高，网格越密，计算时间越长')
+
+        if st.button('▶️ 运行收敛性分析', key='run_convergence', type='primary'):
+            if not levels:
+                st.error('请至少选择一个网格密度级别')
+            else:
+                with st.spinner('正在进行收敛性分析...'):
+                    level_factors = []
+                    for lvl in levels:
+                        if lvl == '1x':
+                            level_factors.append(1)
+                        elif lvl == '2x':
+                            level_factors.append(2)
+                        elif lvl == '4x':
+                            level_factors.append(4)
+                        elif lvl == '8x':
+                            level_factors.append(8)
+                    level_factors.sort()
+
+                    progress_bar = st.progress(0)
+                    convergence_results = []
+
+                    for idx, factor_lvl in enumerate(level_factors):
+                        dx_conv = ref_dx_m / factor_lvl
+                        config_conv = copy.deepcopy(st.session_state.config)
+                        config_conv.dx = dx_conv
+                        config_conv.dy = dx_conv
+                        config_conv.observation_points = [(int(obs_conv_x * factor_lvl),
+                                                           int(obs_conv_y * factor_lvl))]
+
+                        mat_lib_conv = copy.deepcopy(st.session_state.material_lib)
+                        struct_conv = copy.deepcopy(st.session_state.structure_mgr)
+                        src_conv = copy.deepcopy(st.session_state.source_mgr)
+                        bc_conv = copy.deepcopy(st.session_state.boundary)
+
+                        fdtd_conv = FDTD2D(config_conv, mat_lib_conv, struct_conv, src_conv, bc_conv)
+                        result_conv = fdtd_conv.run()
+
+                        obs_pt = (int(obs_conv_x * factor_lvl), int(obs_conv_y * factor_lvl))
+                        obs_data = result_conv.observation_data.get(obs_pt, np.array([]))
+
+                        convergence_results.append({
+                            'factor': factor_lvl,
+                            'dx': dx_conv,
+                            'nx': config_conv.nx,
+                            'ny': config_conv.ny,
+                            'time_points': result_conv.observation_times,
+                            'field_data': obs_data,
+                            'computation_time': result_conv.computation_time
+                        })
+
+                        progress_bar.progress((idx + 1) / len(level_factors))
+
+                    l2_errors = []
+                    for i in range(len(convergence_results) - 1):
+                        coarse = convergence_results[i]
+                        fine = convergence_results[i + 1]
+
+                        n_coarse = len(coarse['field_data'])
+                        n_fine = len(fine['field_data'])
+
+                        if n_coarse > 0 and n_fine > 0:
+                            step_ratio = fine['factor'] // coarse['factor']
+                            coarse_data = coarse['field_data']
+                            fine_sampled = fine['field_data'][::step_ratio]
+
+                            min_len = min(len(coarse_data), len(fine_sampled))
+                            coarse_data = coarse_data[:min_len]
+                            fine_sampled = fine_sampled[:min_len]
+
+                            l2_error = np.sqrt(np.sum((coarse_data - fine_sampled) ** 2)) / \
+                                       (np.sqrt(np.sum(fine_sampled ** 2)) + 1e-30)
+                            l2_errors.append({
+                                'from_factor': coarse['factor'],
+                                'to_factor': fine['factor'],
+                                'error': l2_error
+                            })
+
+                    st.session_state.convergence_result = {
+                        'results': convergence_results,
+                        'l2_errors': l2_errors,
+                        'obs_point': (obs_conv_x, obs_conv_y)
+                    }
+
+                    progress_bar.empty()
+                    st.success('收敛性分析完成!')
+
+        if st.session_state.convergence_result is not None:
+            conv_data = st.session_state.convergence_result
+            conv_results = conv_data['results']
+            l2_errors = conv_data['l2_errors']
+
+            st.divider()
+            st.subheader('时域波形对比')
+
+            fig, ax = plt.subplots(figsize=(10, 5))
+            colors = ['b', 'g', 'r', 'm']
+            for i, res in enumerate(conv_results):
+                color = colors[i % len(colors)]
+                ax.plot(res['time_points'] * 1e9, res['field_data'],
+                        f'{color}-', linewidth=1,
+                        label=f"{res['factor']}x (dx={res['dx']*1e6:.2f}um, {res['nx']}×{res['ny']})")
+            ax.set_xlabel('Time (ns)')
+            ax.set_ylabel('Ez (V/m)')
+            ax.set_title(f"不同网格密度下观测点 {conv_data['obs_point']} 的时域波形")
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+            plt.tight_layout()
+            st.pyplot(fig)
+            plt.close(fig)
+
+            st.divider()
+            st.subheader('收敛曲线 (L2相对误差)')
+
+            if len(l2_errors) > 0:
+                fig, ax = plt.subplots(figsize=(8, 5))
+                x_labels = [f"{err['from_factor']}x→{err['to_factor']}x" for err in l2_errors]
+                y_errors = [err['error'] for err in l2_errors]
+
+                ax.bar(x_labels, y_errors, color='steelblue', alpha=0.7)
+                ax.set_ylabel('L2 相对误差')
+                ax.set_title('相邻网格密度间的相对误差')
+                ax.grid(True, alpha=0.3, axis='y')
+
+                for i, err in enumerate(y_errors):
+                    ax.text(i, err * 1.05, f'{err:.2e}', ha='center', va='bottom')
+
+                plt.tight_layout()
+                st.pyplot(fig)
+                plt.close(fig)
+
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric('最小误差', f'{min(y_errors):.2e}')
+                with col2:
+                    st.metric('最大误差', f'{max(y_errors):.2e}')
+            else:
+                st.info('请选择至少两个网格密度级别以计算收敛误差')
+
+            st.divider()
+            st.subheader('计算信息')
+            info_cols = st.columns(len(conv_results))
+            for i, res in enumerate(conv_results):
+                with info_cols[i]:
+                    st.metric(f"{res['factor']}x 密度", f"{res['nx']}×{res['ny']}")
+                    st.metric('计算耗时', f"{res['computation_time']:.2f}s")
+                    st.caption(f"dx={res['dx']*1e6:.3f}um")
 
     st.divider()
 
