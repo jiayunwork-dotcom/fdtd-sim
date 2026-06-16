@@ -192,42 +192,62 @@ class FDTD2D:
                         self.y_min_pml:self.y_min_pml + self.config.ny] = color_grid
 
         if self.x_min_pml > 0 or self.x_max_pml > 0 or self.y_min_pml > 0 or self.y_max_pml > 0:
-            self._apply_pml_conductivity()
+            pml_sigma_e, pml_sigma_m = self._compute_pml_conductivity()
+            self.sigma += pml_sigma_e
+            self.sigma_m = pml_sigma_m
+        else:
+            self.sigma_m = np.zeros_like(self.mu_r)
 
-    def _apply_pml_conductivity(self):
+    def _compute_pml_conductivity(self):
+        nx, ny = self.nx_total, self.ny_total
+        dx, dy = self.dx, self.dy
+        sigma_e = np.zeros((nx, ny))
+        sigma_m = np.zeros((nx, ny))
+
         m = 4
-        sigma_max_e = 1.5 * (m + 1) / (ETA0 * self.dx)
-        sigma_max_m = sigma_max_e * MU0 / EPS0
-
-        x_indices = np.arange(self.nx_total)
-        y_indices = np.arange(self.ny_total)
-        X, Y = np.meshgrid(x_indices, y_indices, indexing='ij')
-
-        dist = np.zeros_like(X, dtype=float)
+        sigma_e_max = 10.0 * (m + 1) / (ETA0 * dx)
+        sigma_m_max = sigma_e_max * (MU0 / EPS0)
 
         if self.x_min_pml > 0:
-            d = (self.x_min_pml - X[:self.x_min_pml, :]) / self.x_min_pml
-            dist[:self.x_min_pml, :] = np.maximum(dist[:self.x_min_pml, :], d)
+            for i in range(self.x_min_pml):
+                depth = self.x_min_pml - i
+                ratio = depth / self.x_min_pml
+                s_e = sigma_e_max * (ratio ** m)
+                s_m = sigma_m_max * (ratio ** m)
+                sigma_e[i, :] += s_e
+                sigma_m[i, :] += s_m
         if self.x_max_pml > 0:
-            x_start = self.nx_total - self.x_max_pml
-            d = (X[x_start:, :] - (x_start - 1)) / self.x_max_pml
-            dist[x_start:, :] = np.maximum(dist[x_start:, :], d)
+            for i in range(self.x_max_pml):
+                depth = i + 1
+                ratio = depth / self.x_max_pml
+                s_e = sigma_e_max * (ratio ** m)
+                s_m = sigma_m_max * (ratio ** m)
+                idx = nx - self.x_max_pml + i
+                sigma_e[idx, :] += s_e
+                sigma_m[idx, :] += s_m
+
+        sigma_e_max_y = 10.0 * (m + 1) / (ETA0 * dy)
+        sigma_m_max_y = sigma_e_max_y * (MU0 / EPS0)
+
         if self.y_min_pml > 0:
-            d = (self.y_min_pml - Y[:, :self.y_min_pml]) / self.y_min_pml
-            dist[:, :self.y_min_pml] = np.maximum(dist[:, :self.y_min_pml], d)
+            for j in range(self.y_min_pml):
+                depth = self.y_min_pml - j
+                ratio = depth / self.y_min_pml
+                s_e = sigma_e_max_y * (ratio ** m)
+                s_m = sigma_m_max_y * (ratio ** m)
+                sigma_e[:, j] += s_e
+                sigma_m[:, j] += s_m
         if self.y_max_pml > 0:
-            y_start = self.ny_total - self.y_max_pml
-            d = (Y[:, y_start:] - (y_start - 1)) / self.y_max_pml
-            dist[:, y_start:] = np.maximum(dist[:, y_start:], d)
+            for j in range(self.y_max_pml):
+                depth = j + 1
+                ratio = depth / self.y_max_pml
+                s_e = sigma_e_max_y * (ratio ** m)
+                s_m = sigma_m_max_y * (ratio ** m)
+                jdx = ny - self.y_max_pml + j
+                sigma_e[:, jdx] += s_e
+                sigma_m[:, jdx] += s_m
 
-        mask = dist > 0
-        sigma_e = sigma_max_e * (dist[mask] ** m)
-        sigma_m = sigma_max_m * (dist[mask] ** m)
-
-        self.sigma[mask] = np.maximum(self.sigma[mask], sigma_e)
-
-        self.sigma_m = np.zeros_like(self.mu_r)
-        self.sigma_m[mask] = sigma_m
+        return sigma_e, sigma_m
 
     def _init_coefficients(self):
         eps = EPS0 * self.epsilon_r
@@ -235,9 +255,6 @@ class FDTD2D:
 
         self.ca = (1 - self.sigma * self.dt / (2 * eps)) / (1 + self.sigma * self.dt / (2 * eps))
         self.cb = (self.dt / eps) / (1 + self.sigma * self.dt / (2 * eps))
-
-        if not hasattr(self, 'sigma_m'):
-            self.sigma_m = np.zeros_like(self.mu_r)
 
         self.da = (1 - self.sigma_m * self.dt / (2 * mu)) / (1 + self.sigma_m * self.dt / (2 * mu))
         self.db = (self.dt / mu) / (1 + self.sigma_m * self.dt / (2 * mu))

@@ -620,11 +620,19 @@ else:
         with col_left:
             st.subheader('Ez 场分布')
 
+            total_frames = len(result.ez_frames)
+            st.session_state.current_frame = min(
+                st.session_state.get('current_frame', 0),
+                total_frames - 1
+            )
+
             current_frame = st.session_state.current_frame
             ez_frame = result.ez_frames[current_frame]
             vmax = np.max(np.abs(result.ez_frames)) if np.max(np.abs(result.ez_frames)) > 0 else 1.0
 
             color_grid = getattr(st.session_state, 'color_grid', None)
+
+            plot_placeholder = st.empty()
             fig = plot_field_heatmap(
                 ez_frame,
                 title=f'Ez Field - 时间步 {current_frame * config.sample_interval}',
@@ -632,7 +640,7 @@ else:
                 color_grid=color_grid,
                 vmin=-vmax, vmax=vmax
             )
-            st.pyplot(fig)
+            plot_placeholder.pyplot(fig)
             plt.close(fig)
 
             st.divider()
@@ -640,7 +648,7 @@ else:
             col_play1, col_play2, col_play3, col_play4 = st.columns([1, 1, 3, 1])
             with col_play1:
                 if st.button('⏮️', key='prev_frame'):
-                    st.session_state.current_frame = max(0, current_frame - 1)
+                    st.session_state.current_frame = max(0, st.session_state.current_frame - 1)
                     st.rerun()
             with col_play2:
                 if st.button('▶️' if not st.session_state.is_playing else '⏸️',
@@ -648,22 +656,18 @@ else:
                     st.session_state.is_playing = not st.session_state.is_playing
                     st.rerun()
             with col_play3:
-                total_frames = len(result.ez_frames)
-                frame_slider = st.slider('帧', min_value=0, max_value=total_frames - 1,
-                                         value=current_frame, key='frame_slider')
-                if frame_slider != current_frame:
-                    st.session_state.current_frame = frame_slider
-                    st.rerun()
+                frame_idx = st.slider('帧', min_value=0, max_value=total_frames - 1,
+                                      key='current_frame')
             with col_play4:
                 if st.button('⏭️', key='next_frame'):
-                    st.session_state.current_frame = min(total_frames - 1, current_frame + 1)
+                    st.session_state.current_frame = min(total_frames - 1, st.session_state.current_frame + 1)
                     st.rerun()
 
             if st.session_state.is_playing:
                 import time as tm
-                next_frame = (current_frame + 1) % total_frames
+                next_frame = (st.session_state.current_frame + 1) % total_frames
                 st.session_state.current_frame = next_frame
-                tm.sleep(0.05)
+                tm.sleep(0.08)
                 st.rerun()
 
         with col_right:
@@ -820,11 +824,18 @@ else:
 
         if st.button('▶️ 运行参数扫描', key='run_sweep', type='primary'):
             with st.spinner('正在进行参数扫描...'):
+                actual_start = start_val
+                actual_end = end_val
+                if 'frequency' in param_path:
+                    actual_start = start_val * 1e12
+                    actual_end = end_val * 1e12
+                    st.info(f'频率参数已从 THz 转换为 Hz: {start_val}-{end_val} THz → {actual_start:.2e}-{actual_end:.2e} Hz')
+
                 sweep_cfg = SweepConfig(
                     param_name=selected_param,
                     param_path=param_path,
-                    start_value=start_val,
-                    end_value=end_val,
+                    start_value=actual_start,
+                    end_value=actual_end,
                     num_steps=int(num_steps),
                     metric=metric_name,
                     metric_params=metric_params
@@ -847,18 +858,25 @@ else:
                     param_vals, metric_vals, results = sweep.run(sweep_cfg, progress_callback=sweep_cb)
                     progress_bar.empty()
 
-                    st.session_state.sweep_result = (param_vals, metric_vals, results)
+                    st.session_state.sweep_result = (
+                        param_vals, metric_vals, results,
+                        selected_param, selected_metric
+                    )
                     st.success('参数扫描完成!')
                 except Exception as e:
                     st.error(f'参数扫描失败: {e}')
 
         if 'sweep_result' in st.session_state:
-            param_vals, metric_vals, results = st.session_state.sweep_result
+            if len(st.session_state.sweep_result) == 5:
+                param_vals, metric_vals, results, disp_param, disp_metric = st.session_state.sweep_result
+            else:
+                param_vals, metric_vals, results = st.session_state.sweep_result
+                disp_param, disp_metric = selected_param, selected_metric
 
             fig_sweep = plot_parametric_sweep(
                 param_vals, metric_vals,
-                param_name=selected_param,
-                metric_name=selected_metric,
+                param_name=disp_param,
+                metric_name=disp_metric,
                 title='参数扫描结果'
             )
             st.pyplot(fig_sweep)
